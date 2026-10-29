@@ -9,7 +9,7 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v10.1 (2026-10-29): v9 + vision cell stops early when the vision tower is identical; old step1 files ok"
+VERSION = "v11 (2026-10-29): v10.1 + Matryoshka SAE (all models) + pretrained GemmaScope 2 SAEs (Gemma LM)"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -18,7 +18,8 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 CONFIG = dict(name="w1_vision", site="vision", family="gemma3", pt="google/gemma-3-4b-pt", it="google/gemma-3-4b-it",
               layers=[13, 26], n_images=5000, tok_per_image=32, batch=16, n1=4096, k1=32, n2=256, k2=2, alpha=1.0,
               steps=4000, sae_batch=4096, lr=3e-4, n_blocks=100, n_boot=500, n_rand=5, min_fires=20,
-              extra_seeds=[1, 2], inspect_layers=[26])
+              extra_seeds=[1, 2], inspect_layers=[26],
+              gscope_repo="google/gemma-scope-2-4b-pt", gscope_id="16k_l0_small")
 
 LOCAL = os.environ.get("LOCAL_TEST") == "1"
 if LOCAL:
@@ -361,13 +362,14 @@ def parents_from_l2(sae1, sae2):
 def stats_blocks(sae, Xp, Xi, groups, n_groups):
     """Per image block: sums for corr(pt, it) of children, parents and random groups."""
     c, T = CONFIG, CONFIG["tok_per_image"]
+    n1 = sae.W_dec.shape[0]  # 4096 for our SAEs, 16384 for GemmaScope
     n_img = len(Xp) // T
     edges = np.linspace(0, n_img, c["n_blocks"] + 1).astype(int) * T
-    M = torch.zeros(c["n1"], n_groups, device=DEV)
-    M[torch.arange(c["n1"], device=DEV), groups] = 1
+    M = torch.zeros(n1, n_groups, device=DEV)
+    M[torch.arange(n1, device=DEV), groups] = 1
     g = torch.Generator(device="cpu").manual_seed(1)
-    rand = [groups[torch.randperm(c["n1"], generator=g).to(DEV)] for _ in range(c["n_rand"])]  # same sizes
-    Ms = [M] + [torch.zeros_like(M).index_put_((torch.arange(c["n1"], device=DEV), r), torch.ones(c["n1"], device=DEV))
+    rand = [groups[torch.randperm(n1, generator=g).to(DEV)] for _ in range(c["n_rand"])]  # same sizes
+    Ms = [M] + [torch.zeros_like(M).index_put_((torch.arange(n1, device=DEV), r), torch.ones(n1, device=DEV))
                 for r in rand]
     out = []  # per block: list over [children, parents, rand_1..R] of (7, units) arrays
     with torch.no_grad():
@@ -753,6 +755,206 @@ def step7(L, n_rand=20):
     return res
 
 
+# ---------------------------------------------------------------- step 8: Matryoshka SAE + pretrained GemmaScope 2
+MATRY_SIZES = (CONFIG["n2"], CONFIG["n1"] // 4, CONFIG["n1"])  # nested prefixes (256, 1024, 4096); first n2 = parents
+
+
+def train_matry(X, seed=0):
+    """Matryoshka TopK SAE (Bussmann et al. 2025): every prefix of the dictionary must reconstruct x on its own,
+    so early latents learn general concepts and later ones specific ones (no absorption of parents)."""
+    d, c = X.shape[1], CONFIG
+    torch.manual_seed(seed)
+    sae = TopK(d, c["n1"], c["k1"], X[:20000].mean(0)).to(DEV)
+    opt = torch.optim.Adam(sae.parameters(), lr=c["lr"])
+    var = (X[:20000] - X[:20000].mean(0)).pow(2).sum(1).mean()
+    for step in range(c["steps"]):
+        x = X[torch.randint(len(X), (c["sae_batch"],), device=DEV)]
+        xh, z, aux = sae(x)
+        loss = (x - xh).pow(2).sum(1).mean() / var
+        for m in MATRY_SIZES[:-1]:
+            loss = loss + (x - (z[:, :m] @ sae.W_dec[:m] + sae.b_dec)).pow(2).sum(1).mean() / var
+        loss = loss / len(MATRY_SIZES) + aux / 32
+        opt.zero_grad(); loss.backward(); opt.step()
+        sae.renorm()
+        if step % max(1, c["steps"] // 4) == 0:
+            print(f"    step {step} loss {loss.item():.4f}", flush=True)
+    return sae
+
+
+def matry_groups(sae, X, n_par=MATRY_SIZES[0]):
+    """Parents = latents 0..255 (each is its own group's first member); each later latent joins the parent it
+    co-fires with most often (decoder cosine if it never fires). Returns groups and the mean co-fire rate."""
+    n1 = sae.W_dec.shape[0]
+    co = torch.zeros(n1 - n_par, n_par, device=DEV)
+    cnt = torch.zeros(n1 - n_par, device=DEV)
+    with torch.no_grad():
+        for i in range(0, min(len(X), 200000), 8192):
+            f = (sae.encode(X[i:i + 8192]) > 0).float()
+            co += f[:, n_par:].t() @ f[:, :n_par]
+            cnt += f[:, n_par:].sum(0)
+        par = co.argmax(1)
+        cos = F.normalize(sae.W_dec[n_par:], dim=1) @ F.normalize(sae.W_dec[:n_par], dim=1).t()
+        par = torch.where(cnt > 0, par, cos.argmax(1))
+        rate = float((co.max(1).values[cnt > 0] / cnt[cnt > 0]).mean())
+    return torch.cat([torch.arange(n_par, device=DEV), par]), rate
+
+
+class JumpReLU(torch.nn.Module):
+    """Pretrained GemmaScope 2 SAE (JumpReLU). sub_bdec: subtract b_dec before encoding (chosen by FVU)."""
+
+    def __init__(self, p, sub_bdec=False):
+        super().__init__()
+        for k, v in p.items():
+            self.register_buffer(k, v.to(DEV).float())
+        self.W_dec, self.W_enc = self.w_dec, self.w_enc
+        self.sub_bdec = sub_bdec
+        self.register_buffer("since_fired", torch.zeros(self.w_dec.shape[0], device=DEV))
+
+    def encode(self, x):
+        pre = (x - self.b_dec if self.sub_bdec else x) @ self.w_enc + self.b_enc
+        return pre * (pre > self.threshold)
+
+    def forward(self, x):
+        z = self.encode(x)
+        return z @ self.w_dec + self.b_dec, z, x.new_zeros(())
+
+
+def load_gemmascope(L):
+    """Our layer L = hidden_states[L] = output of decoder block L-1 = GemmaScope 'model.layers.{L-1}.output'."""
+    if LOCAL:  # random stand-in with the right shapes (code-path test only)
+        g = torch.Generator().manual_seed(L)
+        d, n = 64, 512
+        return dict(w_enc=torch.randn(d, n, generator=g) / 8, w_dec=torch.randn(n, d, generator=g) / 8,
+                    b_enc=torch.zeros(n), b_dec=torch.zeros(d), threshold=torch.full((n,), 0.5))
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file
+    f = hf_hub_download(CONFIG["gscope_repo"], f"resid_post_all/layer_{L - 1}_width_{CONFIG['gscope_id']}/params.safetensors")
+    return load_file(f)
+
+
+def raw_acts(L):
+    Xp = torch.from_numpy(np.load(f"{ACT}/pt_{CONFIG['site']}{L}.npy")).to(DEV).float()
+    Xi = torch.from_numpy(np.load(f"{ACT}/it_{CONFIG['site']}{L}.npy")).to(DEV).float()
+    return Xp, Xi
+
+
+def coarse_fine(blocks, n_par):
+    """Matryoshka-native view: mean change of the first n_par latents (coarse) vs the rest (fine)."""
+    ch, ok = corr_change(sum(b[0] for b in blocks))
+    idx = np.arange(len(ch))
+    return float(ch[ok & (idx < n_par)].mean()), float(ch[ok & (idx >= n_par)].mean())
+
+
+def eval_pair(tag, name, sae, groups, Xa, Xb, extra=None):
+    cc = torch.bincount(groups[sae.since_fired <= 200], minlength=CONFIG["n2"]).cpu().numpy()
+    blocks = stats_blocks(sae, Xa, Xb, groups, CONFIG["n2"])
+    r = summarize(blocks, cc)
+    if name == "matry":
+        r["coarse_change"], r["fine_change"] = coarse_fine(blocks, MATRY_SIZES[0])
+    r.update(extra or {})
+    cf = f" | coarse {r['coarse_change']:.3f} fine {r['fine_change']:.3f}" if name == "matry" else ""
+    print(f"  {tag} {name}: child {r['child_change']:.3f} parent {r['parent_change']:.3f} random "
+          f"{r['random_group_change']:.3f} | P-R {r['parent_minus_random']:+.3f} CI {r['parent_minus_random_ci'][0]:+.3f},"
+          f"{r['parent_minus_random_ci'][1]:+.3f}{cf}", flush=True)
+    return r
+
+
+def nulls_for(L, name, sae, groups, Xp, Xi, big, target, scale):
+    """Noise and shuffled-difference nulls (as step 5), sigma matched to the real child change."""
+    out = {}
+    g = torch.Generator(device=DEV).manual_seed(2)
+    for kind in ["noise", "shuffle"]:
+        D = (torch.randn(Xp.shape, generator=g, device=DEV) * scale if kind == "noise"
+             else (Xi - Xp)[torch.randperm(len(Xp), generator=g, device=DEV)])
+        D[:, big] = 0
+        lo, hi = math.log(1e-3), math.log(10.0 if kind == "noise" else 5.0)
+        for _ in range(12):
+            mid = (lo + hi) / 2
+            c = child_change(sae, Xp, Xp + math.exp(mid) * D)
+            lo, hi = (mid, hi) if c < target else (lo, mid)
+        sigma = math.exp((lo + hi) / 2)
+        Xn = Xp + sigma * D
+        del D; free()
+        out[kind] = eval_pair(f"{'NULL' if kind == 'noise' else 'SHUF'} L{L}", name, sae, groups, Xp, Xn,
+                              dict(sigma=sigma, target_child_change=target))
+        del Xn; free()
+    return out
+
+
+def step8_matry(L, seed=0):
+    path = f"{OUT}/matry_v11_L{L}.json" if seed == 0 else f"{OUT}/matry_v11_s{seed}_L{L}.json"
+    if os.path.exists(path):
+        print(f"skip matryoshka layer {L} seed {seed} (done)")
+        return json.load(open(path))
+    Xp, Xi, big, res = prep(L)
+    ck = path.replace(".json", ".pt")
+    sae = TopK(Xp.shape[1], CONFIG["n1"], CONFIG["k1"]).to(DEV)
+    if os.path.exists(ck):
+        sae.load_state_dict(torch.load(ck, map_location=DEV))
+    else:
+        print(f"  layer {L} seed {seed}: Matryoshka SAE {MATRY_SIZES}", flush=True)
+        sae = train_matry(torch.cat([Xp, Xi]), seed)
+        torch.save(sae.state_dict(), ck)
+    groups, rate = matry_groups(sae, torch.cat([Xp[:100000], Xi[:100000]]))
+    r = eval_pair(f"L{L} s{seed}", "matry", sae, groups, Xp, Xi,
+                  dict(fvu_pt=fvu(sae, Xp), fvu_it=fvu(sae, Xi), parent_cofire_rate=rate,
+                       sibling_cos_median=sibling_cos(sae.W_dec.data, groups)))
+    print(f"    fvu {r['fvu_pt']:.3f}/{r['fvu_it']:.3f} | child fires with its parent {rate:.2f} of the time", flush=True)
+    res.update(seed=seed, matry=r, matry_nulls=nulls_for(L, "matry", sae, groups, Xp, Xi, big, r["child_change"], 1.0))
+    for k in ["noise", "shuffle"]:
+        print(f"  EXCESS L{L} s{seed} matry over {k}: "
+              f"{r['parent_minus_random'] - res['matry_nulls'][k]['parent_minus_random']:+.3f}", flush=True)
+    save_json(path, res)
+    del Xp, Xi; free()
+    print(f"DONE matryoshka layer {L} seed {seed}", flush=True)
+    return res
+
+
+def step8_gscope(L):
+    """Pretrained GemmaScope 2 SAE (trained on gemma-3-4b-pt text) on RAW activations (no centering / dim
+    removal: it was trained on raw residuals). Groups: post-hoc level-2 SAE on its decoder rows, and k-means."""
+    path = f"{OUT}/gscope_v11_L{L}.json"
+    if os.path.exists(path):
+        print(f"skip gemmascope layer {L} (done)")
+        return json.load(open(path))
+    _, _, big, _ = prep(L)  # only for the massive-dim mask (noise there would dominate)
+    free()
+    Xp, Xi = raw_acts(L)
+    p = load_gemmascope(L)
+    fv = {sb: fvu(JumpReLU(p, sb), Xp) for sb in [False, True]}
+    sub = fv[True] < fv[False]
+    sae = JumpReLU(p, sub)
+    print(f"  layer {L}: GemmaScope {CONFIG['gscope_id']} fvu pt {fv[sub]:.3f} it {fvu(sae, Xi):.3f} "
+          f"(sub_bdec={sub}; other choice {fv[not sub]:.3f}); image tokens are out of its training data", flush=True)
+    Wn = F.normalize(sae.W_dec, dim=1)
+    proxy = TopK(Wn.shape[1], Wn.shape[0], 1).to(DEV)  # holder for the level-2 trainer: unit decoder rows, no training
+    proxy.W_dec.data = Wn.clone(); proxy.since_fired.zero_()
+    proxy.W_dec.requires_grad_(False)
+    proxy.renorm = lambda: None
+    ck = path.replace(".json", ".pt")
+    meta2 = TopK(Wn.shape[1], CONFIG["n2"], CONFIG["k2"]).to(DEV)
+    if os.path.exists(ck):
+        meta2.load_state_dict(torch.load(ck, map_location=DEV))
+    else:
+        print(f"  layer {L}: post-hoc level-2 on GemmaScope decoder", flush=True)
+        _, meta2 = train(Wn, 0.0, sae1=proxy, only_level2=True, seed=0)
+        torch.save(meta2.state_dict(), ck)
+    scale = float(torch.cat([Xp, Xi])[:, ~big].std(0).median())  # noise in units of a typical dim's std
+    res = dict(layer=L, gscope=f"{CONFIG['gscope_repo']} layer_{L - 1}_width_{CONFIG['gscope_id']}",
+               sub_bdec=bool(sub), fvu_pt=fv[sub], fvu_it=fvu(sae, Xi), noise_scale=scale)
+    for name, groups in [("gs_meta", parents_from_l2(proxy, meta2)), ("gs_kmeans", kmeans_groups(Wn, CONFIG["n2"]))]:
+        r = eval_pair(f"L{L}", name, sae, groups, Xp, Xi, dict(sibling_cos_median=sibling_cos(sae.W_dec, groups)))
+        res[name] = r
+        res[name + "_nulls"] = nulls_for(L, name, sae, groups, Xp, Xi, big, r["child_change"], scale)
+        for k in ["noise", "shuffle"]:
+            print(f"  EXCESS L{L} {name} over {k}: "
+                  f"{r['parent_minus_random'] - res[name + '_nulls'][k]['parent_minus_random']:+.3f}", flush=True)
+    save_json(path, res)
+    del Xp, Xi; free()
+    print(f"DONE gemmascope layer {L}", flush=True)
+    return res
+
+
 # ---------------------------------------------------------------- run
 if __name__ == "__main__" or True:
     s1 = step1()
@@ -784,6 +986,13 @@ if __name__ == "__main__" or True:
                 free()
                 step5(L, "noise", seed)
                 step5(L, "shuffle", seed)
+        for L in CONFIG["layers"]:
+            step8_matry(L)
+            free()
+        if CONFIG["family"] == "gemma3" and CONFIG["site"] == "lm":
+            for L in CONFIG["layers"]:
+                step8_gscope(L)
+                free()
     print("\nALL DONE. Results in", OUT)
     print("Read: change = 1 - corr(pt, it). parent_minus_random < 0 with CI below 0 -> real parents are more "
           "stable than random groups of the same size (fine-tuning moves children inside stable parents).")
