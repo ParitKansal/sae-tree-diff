@@ -9,7 +9,7 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v9 (2026-10-29): v8 + third SAE seed (extra_seeds=[1, 2])"
+VERSION = "v10 (2026-10-29): v9 + vision cell stops early when the vision tower is identical"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -757,27 +757,32 @@ def step7(L, n_rand=20):
 if __name__ == "__main__" or True:
     s1 = step1()
     print("step 1:", s1, flush=True)
-    if not s1["vision_identical"] and CONFIG["site"] == "lm":
-        print("NOTE: vision weights differ; also run cell_vision.py (vision-tower layers)")
-    step2("pt")
-    step2("it")
-    for L in CONFIG["layers"]:
-        step34(L)
-        free()
-    for L in CONFIG["layers"]:
-        step5(L)
-    for L in CONFIG["layers"]:
-        step5(L, "shuffle")
-    for L in CONFIG["inspect_layers"]:
-        step6(L)
-    for L in CONFIG["layers"]:
-        step7(L)
-    for seed in CONFIG["extra_seeds"]:
+    tower_same = s1["vision_tower"]["n_changed"] == 0  # projector is outside the vision tower
+    if not tower_same and CONFIG["site"] == "lm":
+        print("NOTE: vision-tower weights differ; also run cell_vision.py (vision-tower layers)")
+    run = not (CONFIG["site"] == "vision" and tower_same)
+    if not run:
+        print("STOP: vision tower is identical in pt and it -> vision activations are identical, nothing to test.")
+    if run:
+        step2("pt")
+        step2("it")
         for L in CONFIG["layers"]:
-            step34(L, seed)
+            step34(L)
             free()
-            step5(L, "noise", seed)
-            step5(L, "shuffle", seed)
+        for L in CONFIG["layers"]:
+            step5(L)
+        for L in CONFIG["layers"]:
+            step5(L, "shuffle")
+        for L in CONFIG["inspect_layers"]:
+            step6(L)
+        for L in CONFIG["layers"]:
+            step7(L)
+        for seed in CONFIG["extra_seeds"]:
+            for L in CONFIG["layers"]:
+                step34(L, seed)
+                free()
+                step5(L, "noise", seed)
+                step5(L, "shuffle", seed)
     print("\nALL DONE. Results in", OUT)
     print("Read: change = 1 - corr(pt, it). parent_minus_random < 0 with CI below 0 -> real parents are more "
           "stable than random groups of the same size (fine-tuning moves children inside stable parents).")

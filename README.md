@@ -169,8 +169,13 @@ choice matter more than sampling. Exploratory; one model pair (Gemma-3-4B pt vs 
   table scenes (cup/table/chair x2-2.6), cars (x1.9-2.1), one food family (sandwich x10.2, cake x8.1).
   Most changed (unchanged list): bathroom, broccoli/carrot, kite, surfing/boats.
 
+- Gemma vision site (2026-10-29): step 1 shows the Gemma vision tower is identical in pt and it (437 tensors,
+  max diff 0.0); only the projector changed (rel 0.16). Vision-tower activations are therefore identical -> nothing
+  to test. Same in Qwen (385 tensors identical). v10: the vision cell stops after step 1 in this case; the NOTE
+  now checks the vision tower only. Gemma LM layer 0 rel change 0.054 (Qwen 0.0022).
+
 ## Open / next
-- Gemma v8 rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
+- Gemma v10 onecell.py (LM site) rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
 - Third SAE seed: Qwen done (36/36); Gemma still to run (v9 onecell.py).
 - Independent code check before any release.
 
