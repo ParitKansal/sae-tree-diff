@@ -68,5 +68,30 @@ methods (not only SAE++). Otherwise: parents and children change about equally -
   SAE++: noise makes its near-copy groups look MORE stable than real fine-tuning does at L12/L20 (not at L28).
   v5 adds a stronger null: pt + sigma * (it - pt) of another random token (`shuf_v5_L*.json`).
 
+- 2026-10-29 shuffled-difference null v5 (pt + sigma*(it-pt) of a random other token; child change matched):
+  null P-R vs real: L12 flat_meta -0.074 vs -0.110, flat_kmeans -0.103 vs -0.132, saepp -0.071 vs -0.047;
+  L20 flat_meta -0.051 vs -0.098, flat_kmeans -0.057 vs -0.109, saepp -0.066 vs -0.028;
+  L28 flat_meta -0.038 vs -0.094, flat_kmeans -0.063 vs -0.112, saepp +0.014 vs -0.034.
+
+## Week-1 summary (exploratory)
+Flat methods, excess = real P-R minus null P-R (negative = parents more stable than the null predicts):
+
+| Layer | noise null (meta / kmeans) | shuffled null (meta / kmeans) |
+|---|---|---|
+| 12 | -0.053 / -0.066 | -0.036 / -0.029 |
+| 20 | -0.045 / -0.051 | -0.047 / -0.052 |
+| 28 | -0.018 / -0.036 | -0.056 / -0.049 |
+
+- Robust part: in all 12 cells (3 layers x 2 flat methods x 2 nulls) the real gap is more negative than the null,
+  by 0.018-0.066. Instruction tuning moves activation between sibling latents while keeping the parent group
+  more stable than size-matched changes do.
+- Not robust: the depth trend (it reverses between the two nulls) -> do not claim it.
+- SAE++ (joint, alpha=1): siblings are near-copies (cos 0.70-0.73), worse FVU, and its excess flips sign by
+  layer (+0.068/+0.083/-0.024 noise; +0.024/+0.038/-0.048 shuffled) -> its groups do not track this structure.
+- Limits: one SAE seed per method, one model pair, LM layers only, image tokens only, raw (no chat) input.
+
+Next: SAE seed repeat; vision site (cell_vision.py); second model pair (Qwen3-VL Instruct vs Thinking);
+look at what the stable parents are (top images).
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).
