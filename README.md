@@ -64,7 +64,7 @@ methods (not only SAE++). Otherwise: parents and children change about equally -
 - 2026-10-29 noise null v4 (child change matched exactly), null P-R vs real P-R:
   L12 flat_meta -0.057 vs -0.110, flat_kmeans -0.066 vs -0.132, saepp -0.115 vs -0.047;
   L20 flat_meta -0.053 vs -0.098, flat_kmeans -0.058 vs -0.109, saepp -0.111 vs -0.028;
-  L28 saepp -0.010 vs -0.034 (flat L28 pending). Flat: real gap about 2x the noise gap (excess about -0.05).
+  L28 saepp -0.010 vs -0.034, flat_meta -0.076 vs -0.094, flat_kmeans -0.076 vs -0.112. Flat excess (real - noise): L12 -0.053/-0.066, L20 -0.045/-0.051, L28 -0.018/-0.036 (shrinks with depth).
   SAE++: noise makes its near-copy groups look MORE stable than real fine-tuning does at L12/L20 (not at L28).
   v5 adds a stronger null: pt + sigma * (it - pt) of another random token (`shuf_v5_L*.json`).
 
