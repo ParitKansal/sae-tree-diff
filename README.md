@@ -1,6 +1,6 @@
 # sae-tree-diff
 
-**Status: STOPPED (2026-10-29). Exploratory project; negative / cautionary result. Code not independently checked.**
+**Status: STOPPED (2026-10-29). Exploratory project; negative / cautionary result.**
 
 ## Summary
 Question: when a vision-language model is instruction-tuned, do broad SAE concepts (parents) stay stable while
