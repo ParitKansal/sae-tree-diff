@@ -9,7 +9,7 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v10 (2026-10-29): v9 + vision cell stops early when the vision tower is identical"
+VERSION = "v10.1 (2026-10-29): v9 + vision cell stops early when the vision tower is identical; old step1 files ok"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -757,7 +757,8 @@ def step7(L, n_rand=20):
 if __name__ == "__main__" or True:
     s1 = step1()
     print("step 1:", s1, flush=True)
-    tower_same = s1["vision_tower"]["n_changed"] == 0  # projector is outside the vision tower
+    # projector is outside the vision tower; old step1 files (w1, before v7) have no per-part dict -> treat as changed
+    tower_same = s1.get("vision_tower", {}).get("n_changed", 1) == 0
     if not tower_same and CONFIG["site"] == "lm":
         print("NOTE: vision-tower weights differ; also run cell_vision.py (vision-tower layers)")
     run = not (CONFIG["site"] == "vision" and tower_same)
