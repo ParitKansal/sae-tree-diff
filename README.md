@@ -230,6 +230,24 @@ child fires with its parent 0.72-0.75 of the time). Excess = real P-R minus null
   on image tokens; (b) our SAEs are trained on the pt+it mix and may give pt/it versions of a concept separate
   sibling latents -> stable parents by construction. v12 control: same SAE trained on pt only.
 
+## v12 control: SAE trained on pt ONLY (Gemma, seed 0, 2026-10-29) - KEY RESULT
+Same flat SAE + meta / k-means, trained on pt activations only. Excess (noise / shuffled):
+
+| Layer | meta | k-means | fvu pt / it | mixed SAE seed 0 (meta, noise / shuf) |
+|---|---|---|---|---|
+| 12 | +0.028 / +0.027 | +0.003 / +0.019 | 0.187 / 0.420 | -0.053 / -0.036 |
+| 20 | +0.029 / +0.015 | +0.028 / +0.023 | 0.206 / 0.500 | -0.045 / -0.047 |
+| 28 | +0.020 / -0.007 | +0.007 / -0.006 | 0.192 / 0.428 | -0.018 / ... |
+
+- 10/12 >= 0, the 2 negatives tiny (-0.006, -0.007). The stable-parent effect DISAPPEARS when the dictionary is
+  trained without it activations. Our 72/72 result depends on training the SAE on the pt+it mix.
+- The pt-only SAE fits it activations ~2.3x worse than pt (fvu 0.42-0.50 vs 0.19-0.21): tuning adds directions
+  pt features do not cover. Hypothesis: the mixed SAE gives these their own (it-specific) children under shared
+  parents -> stable parents by construction. v13 tests this (model-specific children) + it-only SAE mirror.
+- GemmaScope FVU without massive dim 443: L12 1.161 / 1.245, L20 0.814 / 0.962, L28 0.583 / 0.701 (pt / it).
+  GemmaScope does NOT reconstruct image-token activations (FVU >= 0.58, > 1 at L12) -> GemmaScope results are
+  uninformative either way; drop them as evidence (report as a failed fit).
+
 ## Open / next
 - Gemma v10 onecell.py (LM site) rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
 - Third SAE seed: done in both models (72/72).
