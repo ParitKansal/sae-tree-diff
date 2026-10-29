@@ -2,7 +2,7 @@
 src = open("onecell.py").read()
 head = 'CONFIG = dict(name="w1", site="lm", family="gemma3", pt="google/gemma-3-4b-pt", it="google/gemma-3-4b-it",'
 lay = 'layers=[12, 20, 28], n_images=5000, tok_per_image=32, batch=16,'
-insp = 'extra_seeds=[1], inspect_layers=[20])'
+insp = 'extra_seeds=[1, 2], inspect_layers=[20])'
 for x in (head, lay, insp):
     assert src.count(x) == 1, x
 cells = {

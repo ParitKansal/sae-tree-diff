@@ -9,7 +9,7 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v8 (2026-10-29): v7 + examples picked by container score; 'most changed' threshold relative to null"
+VERSION = "v9 (2026-10-29): v8 + third SAE seed (extra_seeds=[1, 2])"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -18,7 +18,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 CONFIG = dict(name="w2_qwen2vl", site="lm", family="qwen2vl", pt="Qwen/Qwen2-VL-2B", it="Qwen/Qwen2-VL-2B-Instruct",
               layers=[10, 16, 23], n_images=5000, tok_per_image=32, batch=32, n1=4096, k1=32, n2=256, k2=2, alpha=1.0,
               steps=4000, sae_batch=4096, lr=3e-4, n_blocks=100, n_boot=500, n_rand=5, min_fires=20,
-              extra_seeds=[1], inspect_layers=[16])
+              extra_seeds=[1, 2], inspect_layers=[16])
 
 LOCAL = os.environ.get("LOCAL_TEST") == "1"
 if LOCAL:
