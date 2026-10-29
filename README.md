@@ -109,5 +109,22 @@ look at what the stable parents are (top images).
   desk (mouse x11.4, laptop x6.0). Hint only (16 groups): outdoor/vehicle/sport stable, food/indoor rewired.
   Caveat: child top-label pt->it is noisy (e.g. children with change 0.02 whose label flips) -> do not over-read.
 
+- v6 seed 1 L28: excess noise -0.032 / -0.034, shuffled -0.069 / -0.047 (seed 0: -0.018 / -0.036, -0.056 / -0.049).
+
+## Week-1 summary after v6 (2 SAE seeds)
+Excess = real P-R minus null P-R, flat methods (meta / kmeans):
+
+| Layer | Seed | noise null | shuffled null |
+|---|---|---|---|
+| 12 | 0 | -0.053 / -0.066 | -0.036 / -0.029 |
+| 12 | 1 | -0.053 / -0.068 | -0.039 / -0.037 |
+| 20 | 0 | -0.045 / -0.051 | -0.047 / -0.052 |
+| 20 | 1 | -0.042 / -0.043 | -0.041 / -0.036 |
+| 28 | 0 | -0.018 / -0.036 | -0.056 / -0.049 |
+| 28 | 1 | -0.032 / -0.034 | -0.069 / -0.047 |
+
+All 24 cells negative (range -0.018 to -0.069). Bootstrap CIs on each P-R are about +/-0.002, so seed and null
+choice matter more than sampling. Exploratory; one model pair (Gemma-3-4B pt vs it), LM layers, COCO images.
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).
