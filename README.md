@@ -93,5 +93,10 @@ Flat methods, excess = real P-R minus null P-R (negative = parents more stable t
 Next: SAE seed repeat; vision site (cell_vision.py); second model pair (Qwen3-VL Instruct vs Thinking);
 look at what the stable parents are (top images).
 
+- v6: `extra_seeds=[1]` retrains flat SAE + meta with seed 1 at all layers and reruns both nulls
+  (`*_s1_L*.json`); `inspect_layers=[20]` writes `parents_L20.json`: the 8 most / least stable flat_meta parents
+  (>= 3 children, >= 500 firing tokens) with the COCO labels over-represented in their top-50 images, and each
+  child's top label in pt -> it.
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).

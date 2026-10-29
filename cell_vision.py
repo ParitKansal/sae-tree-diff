@@ -9,21 +9,22 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v5 (2026-10-29): v4 + shuffled-difference null (pt + it-pt change of another random token)"
+VERSION = "v6 (2026-10-29): v5 + 2nd SAE seed (flat methods, both nulls) + which parents are stable (COCO labels)"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # site "lm" = language-model layers at the image tokens; "vision" = vision-tower layers (SAE++ used layer 26)
 CONFIG = dict(name="w1_vision", site="vision", pt="google/gemma-3-4b-pt", it="google/gemma-3-4b-it", layers=[13, 26],
               n_images=5000, tok_per_image=32, batch=16, n1=4096, k1=32, n2=256, k2=2, alpha=1.0,
-              steps=4000, sae_batch=4096, lr=3e-4, n_blocks=100, n_boot=500, n_rand=5, min_fires=20)
+              steps=4000, sae_batch=4096, lr=3e-4, n_blocks=100, n_boot=500, n_rand=5, min_fires=20,
+              extra_seeds=[1], inspect_layers=[20])
 
 LOCAL = os.environ.get("LOCAL_TEST") == "1"
 if LOCAL:
     OUT = os.environ.get("OUT", "/tmp/saetree")
     CONFIG["site"] = os.environ.get("SITE", CONFIG["site"])
     CONFIG.update(layers=[1, 2] if CONFIG["site"] == "vision" else [1, 3], n_images=3000, tok_per_image=4, batch=50, n1=256, k1=4, n2=32, steps=1500,
-                  sae_batch=1024, n_blocks=30, n_boot=100)
+                  sae_batch=1024, n_blocks=30, n_boot=100, inspect_layers=[3])
 else:
     from google.colab import drive
     drive.mount("/content/drive")
@@ -259,10 +260,10 @@ def level2_loss(sae1, sae2, alive):
     return (W - Wh).pow(2).sum(1).mean(), aux2
 
 
-def train(X, alpha, sae1=None, only_level2=False):
+def train(X, alpha, sae1=None, only_level2=False, seed=0):
     """X: (N, d) float tensor on DEV, already scaled. alpha=0 and not only_level2 -> flat SAE."""
     d, c = X.shape[1], CONFIG
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     if sae1 is None:
         sae1 = TopK(d, c["n1"], c["k1"], X[:20000].mean(0)).to(DEV)
     sae2 = TopK(d, c["n2"], c["k2"]).to(DEV) if (alpha > 0 or only_level2) else None
@@ -409,40 +410,54 @@ def prep(L):
     return Xp, Xi, big, info
 
 
+def fname(kind, L, seed):
+    """seed 0 keeps the original file names; extra seeds (flat methods only) get an _s{seed} name."""
+    base = {"result": "result_v2", "sae": "sae_v2", "noise": "null_v4", "shuffle": "shuf_v5"}[kind]
+    ext = "pt" if kind == "sae" else "json"
+    return f"{OUT}/{base}_L{L}.{ext}" if seed == 0 else f"{OUT}/{base}_s{seed}_L{L}.{ext}"
+
+
 def load_saes(ck, d):
     st = torch.load(ck, map_location=DEV)
     out = {}
     for key, n, k in [("joint1", "n1", "k1"), ("joint2", "n2", "k2"), ("flat", "n1", "k1"), ("meta2", "n2", "k2")]:
-        out[key] = TopK(d, CONFIG[n], CONFIG[k]).to(DEV)
-        out[key].load_state_dict(st[key])
-    return out["joint1"], out["joint2"], out["flat"], out["meta2"]
+        if key in st:
+            out[key] = TopK(d, CONFIG[n], CONFIG[k]).to(DEV)
+            out[key].load_state_dict(st[key])
+    return out.get("joint1"), out.get("joint2"), out["flat"], out["meta2"]
 
 
 def get_methods(joint1, joint2, flat, meta2):
-    return {"saepp_joint": (joint1, parents_from_l2(joint1, joint2)),
-            "flat_meta": (flat, parents_from_l2(flat, meta2)),
-            "flat_kmeans": (flat, kmeans_groups(flat.W_dec.data, CONFIG["n2"]))}
+    m = {} if joint1 is None else {"saepp_joint": (joint1, parents_from_l2(joint1, joint2))}
+    m.update({"flat_meta": (flat, parents_from_l2(flat, meta2)),
+              "flat_kmeans": (flat, kmeans_groups(flat.W_dec.data, CONFIG["n2"]))})
+    return m
 
 
-def step34(L):
-    path = f"{OUT}/result_v2_L{L}.json"  # v2 = with massive-dimension removal
+def step34(L, seed=0):
+    path = fname("result", L, seed)  # v2 = with massive-dimension removal
     if os.path.exists(path):
-        print(f"skip layer {L} (done)")
+        print(f"skip layer {L} seed {seed} (done)")
         return json.load(open(path))
     Xp, Xi, big, res = prep(L)
+    res["seed"] = seed
     X = torch.cat([Xp, Xi])  # 50/50 mix
-    ck = f"{OUT}/sae_v2_L{L}.pt"
+    ck = fname("sae", L, seed)
     if os.path.exists(ck):
         joint1, joint2, flat, meta2 = load_saes(ck, X.shape[1])
     else:
-        print(f"  layer {L}: SAE++ (joint)", flush=True)
-        joint1, joint2 = train(X, CONFIG["alpha"])
-        print(f"  layer {L}: flat SAE", flush=True)
-        flat, _ = train(X, 0.0)
-        print(f"  layer {L}: post-hoc level-2 on flat (meta)", flush=True)
-        _, meta2 = train(X, 0.0, sae1=flat, only_level2=True)
-        torch.save(dict(joint1=joint1.state_dict(), joint2=joint2.state_dict(), flat=flat.state_dict(),
-                        meta2=meta2.state_dict()), ck)
+        st = {}
+        joint1 = joint2 = None
+        if seed == 0:  # extra seeds: flat methods only
+            print(f"  layer {L}: SAE++ (joint)", flush=True)
+            joint1, joint2 = train(X, CONFIG["alpha"], seed=seed)
+            st.update(joint1=joint1.state_dict(), joint2=joint2.state_dict())
+        print(f"  layer {L} seed {seed}: flat SAE", flush=True)
+        flat, _ = train(X, 0.0, seed=seed)
+        print(f"  layer {L} seed {seed}: post-hoc level-2 on flat (meta)", flush=True)
+        _, meta2 = train(X, 0.0, sae1=flat, only_level2=True, seed=seed)
+        st.update(flat=flat.state_dict(), meta2=meta2.state_dict())
+        torch.save(st, ck)
     del X
     methods = get_methods(joint1, joint2, flat, meta2)
     for name, (sae, groups) in methods.items():
@@ -452,13 +467,13 @@ def step34(L):
         r.update(fvu_pt=fvu(sae, Xp), fvu_it=fvu(sae, Xi), dead_frac=float((sae.since_fired > 200).float().mean()),
                  sibling_cos_median=sibling_cos(sae.W_dec.data, groups), n_parents_2plus=int((cc >= 2).sum()))
         res[name] = r
-        print(f"  L{L} {name}: child {r['child_change']:.3f} parent {r['parent_change']:.3f} "
+        print(f"  L{L}{'' if seed == 0 else f' s{seed}'} {name}: child {r['child_change']:.3f} parent {r['parent_change']:.3f} "
               f"random {r['random_group_change']:.3f} | P-R {r['parent_minus_random']:+.3f} "
               f"CI {r['parent_minus_random_ci'][0]:+.3f},{r['parent_minus_random_ci'][1]:+.3f} | "
               f"sib cos {r['sibling_cos_median']:.2f} fvu {r['fvu_pt']:.3f}/{r['fvu_it']:.3f} dead {r['dead_frac']:.2f}",
               flush=True)
     save_json(path, res)
-    print(f"DONE layer {L}", flush=True)
+    print(f"DONE layer {L} seed {seed}", flush=True)
     return res
 
 
@@ -475,18 +490,18 @@ def child_change(sae, A, B):
     return float(ch[ok].mean())
 
 
-def step5(L, kind="noise"):
+def step5(L, kind="noise", seed=0):
     """Null: pt vs pt + sigma * D, sigma chosen so the CHILD change equals the pt-vs-it child change.
     kind "noise": D = isotropic Gaussian. kind "shuffle": D = (it - pt) of ANOTHER random token (real kinds of
     fine-tuning change, but not tied to this token's content). If parent - random is about as negative here,
     the pt-vs-it gap is an SAE effect, not a token-specific fine-tuning effect."""
-    path = f"{OUT}/null_v4_L{L}.json" if kind == "noise" else f"{OUT}/shuf_v5_L{L}.json"
+    path = fname(kind, L, seed)
     if os.path.exists(path):
-        print(f"skip null layer {L} (done)")
+        print(f"skip {kind} null layer {L} seed {seed} (done)")
         return json.load(open(path))
-    real = json.load(open(f"{OUT}/result_v2_L{L}.json"))
+    real = json.load(open(fname("result", L, seed)))
     Xp, Xi, big, _ = prep(L)
-    joint1, joint2, flat, meta2 = load_saes(f"{OUT}/sae_v2_L{L}.pt", Xp.shape[1])
+    joint1, joint2, flat, meta2 = load_saes(fname("sae", L, seed), Xp.shape[1])
     g = torch.Generator(device=DEV).manual_seed(2)
     if kind == "noise":
         noise = torch.randn(Xp.shape, generator=g, device=DEV)
@@ -497,7 +512,7 @@ def step5(L, kind="noise"):
     # calibrate on ALL tokens: the "fires >= min_fires" filter must select the same children as in the result
     # (v3 used 20% of the images -> rarer children dropped -> child change overshot: 0.503 vs target 0.353)
     sub = slice(None)
-    res = dict(layer=L, kind=kind, note="pt vs pt+sigma*D; sigma matched to the pt-vs-it child change per SAE")
+    res = dict(layer=L, kind=kind, seed=seed, note="pt vs pt+sigma*D; sigma matched to the pt-vs-it child change per SAE")
     sig_cache = {}
     for name, (sae, groups) in get_methods(joint1, joint2, flat, meta2).items():
         target = real[name]["child_change"]
@@ -516,13 +531,113 @@ def step5(L, kind="noise"):
         r.update(sigma=sigma, target_child_change=target, real_parent_minus_random=real[name]["parent_minus_random"])
         res[name] = r
         del Xn; free()
-        print(f"  {'NULL' if kind == 'noise' else 'SHUF'} L{L} {name}: sigma {sigma:.3f} child {r['child_change']:.3f} (target {target:.3f}) "
+        print(f"  {'NULL' if kind == 'noise' else 'SHUF'} L{L}{'' if seed == 0 else f' s{seed}'} {name}: sigma {sigma:.3f} child {r['child_change']:.3f} (target {target:.3f}) "
               f"parent {r['parent_change']:.3f} random {r['random_group_change']:.3f} | "
               f"null P-R {r['parent_minus_random']:+.3f} CI {r['parent_minus_random_ci'][0]:+.3f},"
               f"{r['parent_minus_random_ci'][1]:+.3f} vs real {real[name]['parent_minus_random']:+.3f}", flush=True)
     save_json(path, res)
     del Xp, noise; free()
-    print(f"DONE {kind} null layer {L}", flush=True)
+    print(f"DONE {kind} null layer {L} seed {seed}", flush=True)
+    return res
+
+
+# ---------------------------------------------------------------- step 6: which parents are stable?
+def coco_labels(items):
+    """Per image: set of COCO object category names (instances_val2017). LOCAL: fake labels."""
+    if LOCAL:
+        return [{f"c{i % 7}", f"d{i % 3}"} for i in range(len(items))]
+    ann = "/content/coco/annotations/instances_val2017.json"
+    if not os.path.exists(ann):
+        os.system("cd /content/coco && wget -q http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+                  " && unzip -q -o annotations_trainval2017.zip annotations/instances_val2017.json"
+                  " && rm annotations_trainval2017.zip")
+    d = json.load(open(ann))
+    names = {c["id"]: c["name"] for c in d["categories"]}
+    per = {}
+    for a in d["annotations"]:
+        per.setdefault(a["image_id"], set()).add(names[a["category_id"]])
+    return [per.get(int(os.path.basename(p).split(".")[0]), set()) for p in items]
+
+
+def top_labels(img_idx, labels, base, k=3):
+    """Most over-represented COCO labels among these images: (name, share, lift over all images)."""
+    cnt = {}
+    for i in img_idx:
+        for n in labels[i]:
+            cnt[n] = cnt.get(n, 0) + 1
+    out = [(n, c / len(img_idx), (c / len(img_idx)) / max(base[n], 1e-9)) for n, c in cnt.items()]
+    out = [o for o in out if o[1] >= 0.2]
+    return sorted(out, key=lambda o: -o[2])[:k]
+
+
+def step6(L, n_show=8, n_top=50):
+    """flat_meta (seed 0): most and least stable parents (>= 3 children, frequent), with the COCO labels of their
+    top-50 images, and the top label of each of their 4 most frequent children (pt and it)."""
+    path = f"{OUT}/parents_L{L}.json"
+    if os.path.exists(path):
+        print(f"skip parents layer {L} (done)")
+        return json.load(open(path))
+    Xp, Xi, big, _ = prep(L)
+    _, _, flat, meta2 = load_saes(fname("sae", L, 0), Xp.shape[1])
+    groups = parents_from_l2(flat, meta2)
+    T, n1, n2 = CONFIG["tok_per_image"], CONFIG["n1"], CONFIG["n2"]
+    n_img = len(Xp) // T
+    M = torch.zeros(n1, n2, device=DEV)
+    M[torch.arange(n1, device=DEV), groups] = 1
+    Sc = Sp = 0
+    img_c = {"pt": torch.zeros(n_img, n1, device=DEV), "it": torch.zeros(n_img, n1, device=DEV)}
+    with torch.no_grad():
+        for i in range(0, len(Xp), 8192):
+            zp, zi = flat.encode(Xp[i:i + 8192]), flat.encode(Xi[i:i + 8192])
+            rows = torch.arange(i, i + len(zp), device=DEV) // T
+            img_c["pt"].index_add_(0, rows, zp); img_c["it"].index_add_(0, rows, zi)
+            for a, b, tag in [(zp, zi, "c"), (zp @ M, zi @ M, "p")]:
+                S = torch.stack([a.sum(0), b.sum(0), (a * a).sum(0), (b * b).sum(0), (a * b).sum(0),
+                                 (a > 0).sum(0).float(), (b > 0).sum(0).float(),
+                                 torch.full_like(a[0], len(a))]).double()
+                if tag == "c":
+                    Sc = Sc + S
+                else:
+                    Sp = Sp + S
+    ch_change, ch_ok = corr_change(Sc.cpu().numpy())
+    par_change, par_ok = corr_change(Sp.cpu().numpy())
+    fires = Sp[5].cpu().numpy()
+    gr = groups.cpu().numpy()
+    alive = (flat.since_fired <= 200).cpu().numpy() & ch_ok
+    n_kids = np.bincount(gr[alive], minlength=n2)
+    cand = np.where(par_ok & (n_kids >= 3) & (fires >= 500))[0]
+    order = cand[np.argsort(par_change[cand])]
+    labels = coco_labels(image_list())
+    base = {}
+    for ls in labels:
+        for n in ls:
+            base[n] = base.get(n, 0) + 1 / len(labels)
+    img_p = {k: (v @ M).cpu().numpy() for k, v in img_c.items()}
+    img_c = {k: v.cpu().numpy() for k, v in img_c.items()}
+    fmt = lambda tl: ", ".join(f"{n} {s:.2f} (x{l:.1f})" for n, s, l in tl) or "-"
+    res = dict(layer=L, method="flat_meta", seed=0, n_candidates=int(len(cand)), stable=[], unstable=[])
+    for tag, sel in [("stable", order[:n_show]), ("unstable", order[::-1][:n_show])]:
+        for j in sel:
+            kids = np.where((gr == j) & alive)[0]
+            kids = kids[np.argsort(-Sc[5].cpu().numpy()[kids])][:4]
+            top = np.argsort(-img_p["pt"][:, j])[:n_top]
+            kid_info = []
+            for c in kids:
+                tp, ti = np.argsort(-img_c["pt"][:, c])[:n_top], np.argsort(-img_c["it"][:, c])[:n_top]
+                kid_info.append(dict(child=int(c), change=float(ch_change[c]), top_pt=top_labels(tp, labels, base, 1),
+                                     top_it=top_labels(ti, labels, base, 1),
+                                     top_img_overlap=len(set(tp) & set(ti)) / n_top))
+            e = dict(parent=int(j), change=float(par_change[j]), n_children=int(n_kids[j]),
+                     children_mean_change=float(ch_change[(gr == j) & alive].mean()),
+                     top_labels=top_labels(top, labels, base), children=kid_info)
+            res[tag].append(e)
+            kid_s = " / ".join(f"{(k['top_pt'][0][0] if k['top_pt'] else '-')}"
+                               f"->{(k['top_it'][0][0] if k['top_it'] else '-')} {k['change']:.2f}" for k in kid_info)
+            print(f"  {tag.upper():8s} L{L} p{j}: change {e['change']:.2f} (children {e['children_mean_change']:.2f}, "
+                  f"n={e['n_children']}) | {fmt(e['top_labels'])} | kids pt->it: {kid_s}", flush=True)
+    save_json(path, res)
+    del Xp, Xi; free()
+    print(f"DONE parents layer {L}", flush=True)
     return res
 
 
@@ -541,6 +656,14 @@ if __name__ == "__main__" or True:
         step5(L)
     for L in CONFIG["layers"]:
         step5(L, "shuffle")
+    for L in CONFIG["inspect_layers"]:
+        step6(L)
+    for seed in CONFIG["extra_seeds"]:
+        for L in CONFIG["layers"]:
+            step34(L, seed)
+            free()
+            step5(L, "noise", seed)
+            step5(L, "shuffle", seed)
     print("\nALL DONE. Results in", OUT)
     print("Read: change = 1 - corr(pt, it). parent_minus_random < 0 with CI below 0 -> real parents are more "
           "stable than random groups of the same size (fine-tuning moves children inside stable parents).")
