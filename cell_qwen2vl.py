@@ -9,7 +9,7 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v11 (2026-10-29): v10.1 + Matryoshka SAE (all models) + pretrained GemmaScope 2 SAEs (Gemma LM)"
+VERSION = "v12 (2026-10-29): v11 + control SAE trained on pt only + GemmaScope FVU without massive dims"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -955,6 +955,62 @@ def step8_gscope(L):
     return res
 
 
+# ---------------------------------------------------------------- step 9: control - SAE trained on pt ONLY
+def fvu_nobig(sae, X, big):
+    """FVU without the massive dims (they dominate raw variance, so plain FVU on raw data looks too good)."""
+    with torch.no_grad():
+        Xs = X[:20000]
+        e = (Xs - sae(Xs)[0])[:, ~big]
+        return float(e.pow(2).sum(1).mean() / (Xs - Xs.mean(0))[:, ~big].pow(2).sum(1).mean())
+
+
+def step9_ptonly(L):
+    """Our SAEs are trained on the 50/50 pt+it mix, so they see both versions of every token and may give the
+    pt-vs-it differences their own sibling latents (children swap, parent stays) -> stable parents by
+    construction. Control: the same flat SAE + meta / k-means, trained on pt activations only, scored the same."""
+    path = f"{OUT}/ptonly_v12_L{L}.json"
+    if os.path.exists(path):
+        print(f"skip pt-only layer {L} (done)")
+        return json.load(open(path))
+    Xp, Xi, big, res = prep(L)
+    ck = path.replace(".json", ".pt")
+    if os.path.exists(ck):
+        st = torch.load(ck, map_location=DEV)
+        flat, meta2 = TopK(Xp.shape[1], CONFIG["n1"], CONFIG["k1"]).to(DEV), TopK(Xp.shape[1], CONFIG["n2"], CONFIG["k2"]).to(DEV)
+        flat.load_state_dict(st["flat"]); meta2.load_state_dict(st["meta2"])
+    else:
+        print(f"  layer {L}: flat SAE on pt only", flush=True)
+        flat, _ = train(Xp, 0.0, seed=0)
+        _, meta2 = train(Xp, 0.0, sae1=flat, only_level2=True, seed=0)
+        torch.save(dict(flat=flat.state_dict(), meta2=meta2.state_dict()), ck)
+    res.update(fvu_pt=fvu(flat, Xp), fvu_it=fvu(flat, Xi))
+    print(f"    pt-only SAE fvu pt {res['fvu_pt']:.3f} it {res['fvu_it']:.3f}", flush=True)
+    for name, (sae, groups) in get_methods(None, None, flat, meta2).items():
+        r = eval_pair(f"PTONLY L{L}", name, sae, groups, Xp, Xi)
+        res[name] = r
+        res[name + "_nulls"] = nulls_for(L, name, sae, groups, Xp, Xi, big, r["child_change"], 1.0)
+        for k in ["noise", "shuffle"]:
+            print(f"  EXCESS PTONLY L{L} {name} over {k}: "
+                  f"{r['parent_minus_random'] - res[name + '_nulls'][k]['parent_minus_random']:+.3f}", flush=True)
+    save_json(path, res)
+    del Xp, Xi; free()
+    print(f"DONE pt-only layer {L}", flush=True)
+    return res
+
+
+def gscope_fvu(L):
+    path = f"{OUT}/gscope_fvu_v12_L{L}.json"
+    if os.path.exists(path) or not os.path.exists(f"{OUT}/gscope_v11_L{L}.json"):
+        return
+    _, _, big, _ = prep(L)
+    Xp, Xi = raw_acts(L)
+    sae = JumpReLU(load_gemmascope(L), json.load(open(f"{OUT}/gscope_v11_L{L}.json"))["sub_bdec"])
+    r = dict(layer=L, fvu_nobig_pt=fvu_nobig(sae, Xp, big), fvu_nobig_it=fvu_nobig(sae, Xi, big))
+    print(f"  GemmaScope L{L} fvu without massive dims: pt {r['fvu_nobig_pt']:.3f} it {r['fvu_nobig_it']:.3f}", flush=True)
+    save_json(path, r)
+    del Xp, Xi, sae; free()
+
+
 # ---------------------------------------------------------------- run
 if __name__ == "__main__" or True:
     s1 = step1()
@@ -986,12 +1042,18 @@ if __name__ == "__main__" or True:
                 free()
                 step5(L, "noise", seed)
                 step5(L, "shuffle", seed)
+        for L in CONFIG["layers"]:  # v12 control first: needs only our own code, decides how to read everything else
+            step9_ptonly(L)
+            free()
         for L in CONFIG["layers"]:
             step8_matry(L)
             free()
         if CONFIG["family"] == "gemma3" and CONFIG["site"] == "lm":
             for L in CONFIG["layers"]:
                 step8_gscope(L)
+                free()
+            for L in CONFIG["layers"]:
+                gscope_fvu(L)
                 free()
     print("\nALL DONE. Results in", OUT)
     print("Read: change = 1 - corr(pt, it). parent_minus_random < 0 with CI below 0 -> real parents are more "
