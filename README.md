@@ -186,9 +186,22 @@ choice matter more than sampling. Exploratory; one model pair (Gemma-3-4B pt vs 
 - parents_v8 L20 changed (parent 0.89-0.94): tennis, food (broccoli x16.9, carrot x14.8), desk (mouse, laptop),
   sheep/train, bathroom (sink x10.2, toilet x9.4). Food + bathroom most changed in both Gemma and Qwen.
 
+## Gemma seed 2 (v9/v11 run, 2026-10-29)
+Excess = real P-R minus null P-R (meta / kmeans):
+
+| Layer | noise null | shuffled null |
+|---|---|---|
+| 12 | -0.046 / -0.059 | -0.030 / -0.024 |
+| 20 | -0.051 / -0.033 | -0.055 / -0.031 |
+| 28 | -0.030 / -0.045 | -0.066 / -0.062 |
+
+All 12 negative. Gemma 3 seeds: 36/36; Qwen 3 seeds: 36/36; both models 72/72 cells negative.
+Real P-R seed 2: L12 -0.110/-0.119, L20 -0.106/-0.095, L28 -0.105/-0.115 (seeds 0-1: -0.09 to -0.13).
+
 ## Open / next
 - Gemma v10 onecell.py (LM site) rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
-- Third SAE seed: Qwen done (36/36); Gemma still to run (v9 onecell.py).
+- Third SAE seed: done in both models (72/72).
+- v11 Matryoshka + GemmaScope 2: running (Gemma), Qwen Matryoshka optional.
 - Independent code check before any release.
 
 ## Before any public release
