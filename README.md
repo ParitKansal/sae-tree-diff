@@ -36,5 +36,12 @@ Go if, in at least one layer, parent - random differs from 0 by > 0.01 with CI e
 methods (not only SAE++). Otherwise: parents and children change about equally -> stop or change the pair
 (e.g. Qwen3-VL Instruct vs Thinking).
 
+## Colab log
+- 2026-10-29 w1 (LM site) step 1: vision weights of pt and it are NOT identical (max abs diff 0.18 over vision
+  tower + projector; LM layer 0 max abs diff 1.5). So the vision tower can also change -> `cell_vision.py`
+  (vision-tower layers 13 and 26; 26 = SAE++ site). Its step 1 also splits the difference by part
+  (vision_tower / projector / lm_layer0) with relative change ||w_it - w_pt|| / ||w_pt||.
+  Results: `MyDrive/sae_tree_diff/w1_vision/`. Rebuild cells with `python3 make_cells.py`.
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).

@@ -10,14 +10,16 @@
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time
 
-CONFIG = dict(name="w1", pt="google/gemma-3-4b-pt", it="google/gemma-3-4b-it", layers=[12, 20, 28],
+# site "lm" = language-model layers at the image tokens; "vision" = vision-tower layers (SAE++ used layer 26)
+CONFIG = dict(name="w1", site="lm", pt="google/gemma-3-4b-pt", it="google/gemma-3-4b-it", layers=[12, 20, 28],
               n_images=5000, tok_per_image=32, batch=16, n1=4096, k1=32, n2=256, k2=2, alpha=1.0,
               steps=4000, sae_batch=4096, lr=3e-4, n_blocks=100, n_boot=500, n_rand=5, min_fires=20)
 
 LOCAL = os.environ.get("LOCAL_TEST") == "1"
 if LOCAL:
     OUT = os.environ.get("OUT", "/tmp/saetree")
-    CONFIG.update(layers=[1, 3], n_images=3000, tok_per_image=4, batch=50, n1=256, k1=4, n2=32, steps=1500,
+    CONFIG["site"] = os.environ.get("SITE", CONFIG["site"])
+    CONFIG.update(layers=[1, 2] if CONFIG["site"] == "vision" else [1, 3], n_images=3000, tok_per_image=4, batch=50, n1=256, k1=4, n2=32, steps=1500,
                   sae_batch=1024, n_blocks=30, n_boot=100)
 else:
     from google.colab import drive
@@ -108,39 +110,53 @@ def step1():
     path = f"{OUT}/step1_vision.json"
     if os.path.exists(path):
         return json.load(open(path))
-    keep = lambda n: "vision_tower" in n or "multi_modal_projector" in n
+    part = lambda n: ("vision_tower" if "vision_tower" in n else "projector" if "multi_modal_projector" in n
+                      else "lm_layer0" if "layers.0." in n else None)
     m, _ = load_model("pt")
-    vis = {n: p.detach().float().cpu() for n, p in m.named_parameters() if keep(n)}
-    lm0 = {n: p.detach().float().cpu() for n, p in m.named_parameters() if "layers.0." in n and not keep(n)}
+    ref = {n: p.detach().float().cpu() for n, p in m.named_parameters() if part(n)}
     del m; torch.cuda.empty_cache()
     m, _ = load_model("it")
-    dv = max((p.detach().float().cpu() - vis[n]).abs().max().item() for n, p in m.named_parameters() if keep(n))
-    dl = max((p.detach().float().cpu() - lm0[n]).abs().max().item() for n, p in m.named_parameters() if n in lm0)
+    r = {}
+    for n, p in m.named_parameters():
+        if part(n):
+            d = p.detach().float().cpu() - ref[n]
+            q = r.setdefault(part(n), dict(max_abs_diff=0.0, d2=0.0, w2=0.0, n_changed=0, n_tensors=0))
+            q["max_abs_diff"] = max(q["max_abs_diff"], d.abs().max().item())
+            q["d2"] += d.pow(2).sum().item(); q["w2"] += ref[n].pow(2).sum().item()
+            q["n_changed"] += int((d != 0).any()); q["n_tensors"] += 1
     del m; torch.cuda.empty_cache()
-    r = dict(vision_max_abs_diff=dv, vision_identical=dv == 0.0, lm_layer0_max_abs_diff=dl, n_vision_tensors=len(vis))
+    for q in r.values():  # relative change = ||w_it - w_pt|| / ||w_pt||
+        q["rel_change"] = math.sqrt(q.pop("d2") / max(q.pop("w2"), 1e-30))
+    r["vision_identical"] = r["vision_tower"]["max_abs_diff"] == 0.0 and r["projector"]["max_abs_diff"] == 0.0
     save_json(path, r)
     return r
 
 
 # ---------------------------------------------------------------- step 2: activations
 def step2(which):
-    paths = {L: f"{ACT}/{which}_L{L}.npy" for L in CONFIG["layers"]}
+    paths = {L: f"{ACT}/{which}_{CONFIG['site']}{L}.npy" for L in CONFIG["layers"]}
     if all(os.path.exists(p) for p in paths.values()):
         return
     items = image_list()
     T, B = CONFIG["tok_per_image"], CONFIG["batch"]
     m, proc = load_model(which)
     img_id = m.config.image_token_id if hasattr(m.config, "image_token_id") else m.config.image_token_index
-    bufs = {L: np.lib.format.open_memmap(paths[L] + ".part", "w+", np.float16,
-                                         (len(items) * T, m.config.text_config.hidden_size))
+    vision = CONFIG["site"] == "vision"
+    width = (m.config.vision_config if vision else m.config.text_config).hidden_size
+    bufs = {L: np.lib.format.open_memmap(paths[L] + ".part", "w+", np.float16, (len(items) * T, width))
             for L in CONFIG["layers"]}
     t0 = time.time()
     with torch.no_grad():
         for s in range(0, len(items), B):
             chunk = items[s:s + B]
             x = make_inputs(m, proc, chunk)
-            hs = m(**x, output_hidden_states=True).hidden_states
-            mask = x["input_ids"] == img_id
+            if vision:  # vision tower only; hidden_states[L] = output of vision layer L (patch tokens)
+                hs = m.model.vision_tower(pixel_values=x["pixel_values"].to(m.dtype),
+                                          output_hidden_states=True).hidden_states
+                mask = torch.ones(hs[0].shape[:2], dtype=torch.bool, device=hs[0].device)
+            else:
+                hs = m(**x, output_hidden_states=True).hidden_states
+                mask = x["input_ids"] == img_id
             n_img = int(mask[0].sum())
             for i in range(len(chunk)):
                 # the same T image-token positions for both models (seeded by the image index)
@@ -363,8 +379,8 @@ def step34(L):
     if os.path.exists(path):
         print(f"skip layer {L} (done)")
         return json.load(open(path))
-    Xp = torch.from_numpy(np.load(f"{ACT}/pt_L{L}.npy")).to(DEV).float()
-    Xi = torch.from_numpy(np.load(f"{ACT}/it_L{L}.npy")).to(DEV).float()
+    Xp = torch.from_numpy(np.load(f"{ACT}/pt_{CONFIG['site']}{L}.npy")).to(DEV).float()
+    Xi = torch.from_numpy(np.load(f"{ACT}/it_{CONFIG['site']}{L}.npy")).to(DEV).float()
     raw_cos = float(F.cosine_similarity(Xp, Xi, dim=1).mean())
     scale = math.sqrt(Xp.shape[1]) / torch.cat([Xp, Xi]).norm(dim=1).mean()
     Xp, Xi = Xp * scale, Xi * scale
@@ -411,8 +427,8 @@ def step34(L):
 if __name__ == "__main__" or True:
     s1 = step1()
     print("step 1:", s1, flush=True)
-    if not s1["vision_identical"]:
-        print("NOTE: vision weights differ; this cell still reads LM layers only (vision site not added yet)")
+    if not s1["vision_identical"] and CONFIG["site"] == "lm":
+        print("NOTE: vision weights differ; also run cell_vision.py (vision-tower layers)")
     step2("pt")
     step2("it")
     for L in CONFIG["layers"]:
