@@ -198,6 +198,28 @@ Excess = real P-R minus null P-R (meta / kmeans):
 All 12 negative. Gemma 3 seeds: 36/36; Qwen 3 seeds: 36/36; both models 72/72 cells negative.
 Real P-R seed 2: L12 -0.110/-0.119, L20 -0.106/-0.095, L28 -0.105/-0.115 (seeds 0-1: -0.09 to -0.13).
 
+## v11 Matryoshka + GemmaScope 2 (2026-10-29, seed 0)
+Matryoshka TopK SAE (prefixes 256/1024/4096; parents = first 256, children join the parent they co-fire with most;
+child fires with its parent 0.72-0.75 of the time). Excess = real P-R minus null P-R:
+
+| Model | Layer | over noise | over shuffled | coarse / fine change (real; shuffled) |
+|---|---|---|---|---|
+| Gemma | 12 | +0.034 | -0.014 | 0.349 / 0.391; 0.321 / 0.393 |
+| Gemma | 20 | +0.031 | -0.027 | 0.558 / 0.666; 0.548 / 0.667 |
+| Gemma | 28 | +0.072 | -0.056 | 0.491 / 0.601; 0.494 / 0.600 |
+| Qwen | 10 | -0.003 | -0.002 | 0.011 / 0.020; 0.010 / 0.020 |
+| Qwen | 16 | -0.005 | -0.003 | 0.014 / 0.031; 0.013 / 0.031 |
+| Qwen | 23 | -0.004 | -0.002 | 0.018 / 0.037; 0.019 / 0.037 |
+
+- Shuffled null: 6/6 negative (Gemma -0.014 to -0.056; Qwen -0.002 to -0.003, smaller than flat SAEs).
+- Noise null: Gemma 3/3 POSITIVE (Matryoshka coarse latents are very robust to isotropic noise: coarse change
+  under noise 0.15-0.32 vs real 0.35-0.56); Qwen 3/3 negative.
+- Coarse vs fine: real coarse change is about equal to the shuffled-null coarse change in both models -> no extra
+  protection of Matryoshka's coarse latents beyond what a shuffled change gives.
+- GemmaScope 2 (16k_l0_small, raw activations), Gemma L12: gs_meta P-R +0.090 real vs +0.081 noise / +0.089 shuffled
+  -> excess +0.009 / +0.001 (no effect). FVU 0.066 printed is dominated by massive dim 443 (97.5% of variance at
+  L12) -> needs an FVU without dim 443 before reading GemmaScope as evidence. Rest pending.
+
 ## Open / next
 - Gemma v10 onecell.py (LM site) rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
 - Third SAE seed: done in both models (72/72).
