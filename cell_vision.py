@@ -143,7 +143,7 @@ def step2(which):
     img_id = m.config.image_token_id if hasattr(m.config, "image_token_id") else m.config.image_token_index
     vision = CONFIG["site"] == "vision"
     width = (m.config.vision_config if vision else m.config.text_config).hidden_size
-    bufs = {L: np.lib.format.open_memmap(paths[L] + ".part", "w+", np.float16, (len(items) * T, width))
+    bufs = {L: np.lib.format.open_memmap(paths[L] + ".part", "w+", np.float32, (len(items) * T, width))
             for L in CONFIG["layers"]}
     t0 = time.time()
     with torch.no_grad():
@@ -167,7 +167,12 @@ def step2(which):
             if s % (B * 50) == 0:
                 print(f"  {which} {s + len(chunk)}/{len(items)} images, {time.time() - t0:.0f}s", flush=True)
     for L in CONFIG["layers"]:
-        bufs[L].flush(); del bufs[L]
+        a = bufs[L]
+        assert np.isfinite(a[::97]).all(), f"non-finite activations at layer {L}"
+        top = np.abs(a[::97]).max(0)
+        print(f"  {which} L{L}: max |x| {top.max():.0f}, top-3 dims {np.argsort(-top)[:3].tolist()}, "
+              f"median-dim max {np.median(top):.1f}", flush=True)
+        a.flush(); del bufs[L], a
         os.replace(paths[L] + ".part", paths[L])
     del m; torch.cuda.empty_cache()
     if LOCAL and os.environ.get("SYNTH") == "1":  # replace with planted-tree data (known answer)
