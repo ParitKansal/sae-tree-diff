@@ -9,6 +9,8 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
+VERSION = "v2 (2026-10-29): float32 activations, no logits, massive dims removed before SAEs"
+print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # site "lm" = language-model layers at the image tokens; "vision" = vision-tower layers (SAE++ used layer 26)
