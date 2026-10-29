@@ -133,5 +133,29 @@ choice matter more than sampling. Exploratory; one model pair (Gemma-3-4B pt vs 
   share of parents whose container score (mean child change - parent change) beats the 95th percentile of
   size-matched random groups, and share with parent change >= 0.8. Planted test: container 0.31-0.41 vs null 0.05.
 
+## Second model: Qwen2-VL-2B base vs Instruct (w2_qwen2vl, v7, 2026-10-29)
+- Step 1: vision tower identical (385 tensors), projector rel change 1.2%, LM layer 0 rel change 0.22% (very light
+  tuning). Image step 12 images/s (L4). Removed dim 1073 (6.7-11.6% of centered variance).
+- Child change only 0.022 / 0.032 / 0.037 (L10 / L16 / L23) vs 0.42-0.67 in Gemma.
+- SAE++ sibling cos 0.70 at all layers (Gemma 0.70-0.73) -> near-copy siblings in both model families.
+- Excess = real P-R minus null P-R (meta / kmeans):
+
+| Layer | Seed | noise null | shuffled null |
+|---|---|---|---|
+| 10 | 0 | -0.008 / -0.007 | -0.006 / -0.004 |
+| 10 | 1 | -0.009 / -0.007 | -0.006 / -0.006 |
+| 16 | 0 | -0.008 / -0.008 | -0.006 / -0.006 |
+| 16 | 1 | -0.007 / -0.009 | -0.005 / -0.006 |
+| 23 | 0 | -0.006 / -0.006 | -0.005 / -0.005 |
+| 23 | 1 | -0.007 / -0.006 | -0.005 / -0.004 |
+
+  All 24 negative (-0.004 to -0.009), i.e. 12-41% of the child change (Gemma: 3-16%). Shuffled sigma 0.94-1.12
+  (real it-pt differences at about natural size). Two models together: 48 of 48 cells negative.
+- Families (v7 step 7): container share 0.10/0.07 (L10), 0.08/0.07 (L16), 0.19/0.19 (L23) vs null 0.05.
+  v7 'rewired' (parent change >= 0.8) is 0 everywhere (absolute threshold does not fit Qwen) -> v8 relative rule.
+- Most-changed families at L16 include bathroom (toilet x14.1, sink x7.0) and food (broccoli x23.9, carrot x23.5),
+  as in Gemma L20 (sink x10.2, toilet x9.4; broccoli x16.9, carrot x14.8). Hint only (8 groups per model).
+  v7 'STABLE' examples were untouched groups (change 0.00), not containers -> v8 picks by container score.
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).
