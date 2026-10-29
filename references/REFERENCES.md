@@ -31,3 +31,19 @@
 | Feature hedging | arXiv 2505.11756 | absorption / hedging in hierarchies |
 | Lin et al. - The Unlocking Spell on Base LLMs (URIAL) | arXiv 2312.01552 | alignment shifts mostly style tokens (output-level) |
 | SAE-FT for CLIP | arXiv 2605.15961 | SAE features drift under fine-tuning (vision) |
+
+## Literature review 2026-10-29 (round 3: is the shared-dictionary artifact known?)
+| Paper | ID / link | Why it matters |
+|---|---|---|
+| Bricken et al. 2024 - Stage-wise model diffing | transformer-circuits.pub/2024/model-diffing | base SAE fine-tuned on new data vs new model; separates data from model effects |
+| Anthropic 2025 - Insights on crosscoder model diffing | transformer-circuits.pub/2025/crosscoder-diffing-update | most model-exclusive features monosemantic after a method tweak |
+| Tied crosscoders (LessWrong / AF) | alignmentforum.org/posts/3T8eKyaPvDDm2wzor | base-only and chat-only latents qualitatively similar; tuning changes feature correlations |
+| SAE on activation differences (diff-SAE) | lesswrong.com/posts/XPNJSa3BxMAN4ZXc7 | dictionary on (chat - base) |
+| Narrow finetuning leaves readable traces in activation differences | arXiv 2510.13900 (ICLR 2026) | raw activation diffs, no SAE |
+| Simple LLM baselines are competitive for model diffing | arXiv 2602.10371 | baselines vs SAE diffing |
+| The Model Organism Lottery | arXiv 2607.01033 | interpretability results depend on training methodology; uses GemmaScope 2 |
+| Paulo & Belrose - SAEs trained on the same data learn different features | arXiv 2501.16615 (ICLR 2026) | seed dependence (TopK worse) |
+| FaithfulSAE | arXiv 2506.17673 | SAE dependence on external training data |
+| Sparse crosscoders for diffing MoE and dense models | arXiv 2603.05805 | crosscoder diffing across architectures |
+Not found: any paper on feature hierarchies / families in base-vs-tuned diffing, or showing that a shared (pt+it)
+dictionary manufactures stable hierarchies that a base-only dictionary does not show.
