@@ -174,6 +174,18 @@ choice matter more than sampling. Exploratory; one model pair (Gemma-3-4B pt vs 
   to test. Same in Qwen (385 tensors identical). v10: the vision cell stops after step 1 in this case; the NOTE
   now checks the vision tower only. Gemma LM layer 0 rel change 0.054 (Qwen 0.0022).
 
+## Gemma v8 families + examples (v9 run, 2026-10-29)
+- Activations re-extracted (about 17 min per model, 4.8 images/s on L4); seed-0/1 results reused from Drive.
+- families_v8 (meta / kmeans): container share L12 0.09/0.08, L20 0.05/0.02, L28 0.43/0.35 (null 0.05);
+  changed share L12 0.10/0.05, L20 0.08/0.04, L28 0.11/0.07 (null 0.05). Score median (child - parent change)
+  +0.03 to +0.06 vs null -0.04 to -0.06 at every layer: the whole distribution shifts, but at L20 the tail
+  above the null 95th pct is at chance. Gemma (meta) also has a small 'changed' excess (0.08-0.11), unlike Qwen.
+- parents_v8 L20 container: baseball (glove x22, bat x15.5), elephant x11.2, dog x5.6; parent change 0.06-0.38,
+  children 0.53-0.82; several are generic 'person' groups (lift < 1). Children relabel (frisbee->sports ball,
+  hot dog->pizza).
+- parents_v8 L20 changed (parent 0.89-0.94): tennis, food (broccoli x16.9, carrot x14.8), desk (mouse, laptop),
+  sheep/train, bathroom (sink x10.2, toilet x9.4). Food + bathroom most changed in both Gemma and Qwen.
+
 ## Open / next
 - Gemma v10 onecell.py (LM site) rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
 - Third SAE seed: Qwen done (36/36); Gemma still to run (v9 onecell.py).
