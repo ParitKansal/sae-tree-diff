@@ -8,7 +8,8 @@
 # Step 4: per latent, change = 1 - corr(pt activation, it activation) over the same tokens; compare children,
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
-import os, json, math, time
+import os, json, math, time, gc
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # site "lm" = language-model layers at the image tokens; "vision" = vision-tower layers (SAE++ used layer 26)
 CONFIG = dict(name="w1", site="lm", pt="google/gemma-3-4b-pt", it="google/gemma-3-4b-it", layers=[12, 20, 28],
@@ -41,6 +42,12 @@ import torch.nn.functional as F
 import transformers
 print("torch", torch.__version__, "transformers", transformers.__version__, flush=True)
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def free():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def save_json(path, obj):
@@ -114,7 +121,7 @@ def step1():
                       else "lm_layer0" if "layers.0." in n else None)
     m, _ = load_model("pt")
     ref = {n: p.detach().float().cpu() for n, p in m.named_parameters() if part(n)}
-    del m; torch.cuda.empty_cache()
+    del m; free()
     m, _ = load_model("it")
     r = {}
     for n, p in m.named_parameters():
@@ -124,7 +131,7 @@ def step1():
             q["max_abs_diff"] = max(q["max_abs_diff"], d.abs().max().item())
             q["d2"] += d.pow(2).sum().item(); q["w2"] += ref[n].pow(2).sum().item()
             q["n_changed"] += int((d != 0).any()); q["n_tensors"] += 1
-    del m; torch.cuda.empty_cache()
+    del m, p; free()
     for q in r.values():  # relative change = ||w_it - w_pt|| / ||w_pt||
         q["rel_change"] = math.sqrt(q.pop("d2") / max(q.pop("w2"), 1e-30))
     r["vision_identical"] = r["vision_tower"]["max_abs_diff"] == 0.0 and r["projector"]["max_abs_diff"] == 0.0
@@ -155,7 +162,7 @@ def step2(which):
                                           output_hidden_states=True).hidden_states
                 mask = torch.ones(hs[0].shape[:2], dtype=torch.bool, device=hs[0].device)
             else:
-                hs = m(**x, output_hidden_states=True).hidden_states
+                hs = m.model(**x, output_hidden_states=True).hidden_states  # m.model: no lm_head/logits
                 mask = x["input_ids"] == img_id
             n_img = int(mask[0].sum())
             for i in range(len(chunk)):
@@ -174,7 +181,7 @@ def step2(which):
               f"median-dim max {np.median(top):.1f}", flush=True)
         a.flush(); del bufs[L], a
         os.replace(paths[L] + ".part", paths[L])
-    del m; torch.cuda.empty_cache()
+    del m, hs, x, mask; free()
     if LOCAL and os.environ.get("SYNTH") == "1":  # replace with planted-tree data (known answer)
         for L in CONFIG["layers"]:
             np.save(paths[L], planted(which, len(items) * T, L))
