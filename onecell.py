@@ -9,7 +9,7 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v7 (2026-10-29): v6 + Qwen2-VL support, faster image step (prefetch thread, one GPU->CPU copy), family count"
+VERSION = "v8 (2026-10-29): v7 + examples picked by container score; 'most changed' threshold relative to null"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -617,7 +617,7 @@ def top_labels(img_idx, labels, base, k=3):
 def step6(L, n_show=8, n_top=50):
     """flat_meta (seed 0): most and least stable parents (>= 3 children, frequent), with the COCO labels of their
     top-50 images, and the top label of each of their 4 most frequent children (pt and it)."""
-    path = f"{OUT}/parents_L{L}.json"
+    path = f"{OUT}/parents_v8_L{L}.json"
     if os.path.exists(path):
         print(f"skip parents layer {L} (done)")
         return json.load(open(path))
@@ -649,8 +649,12 @@ def step6(L, n_show=8, n_top=50):
     gr = groups.cpu().numpy()
     alive = (flat.since_fired <= 200).cpu().numpy() & ch_ok
     n_kids = np.bincount(gr[alive], minlength=n2)
+    kid_mean = np.bincount(gr[alive], weights=ch_change[alive], minlength=n2) / np.maximum(n_kids, 1)
     cand = np.where(par_ok & (n_kids >= 3) & (fires >= 500))[0]
-    order = cand[np.argsort(par_change[cand])]
+    # v8: "container" = children move but the parent stays (largest child change - parent change);
+    # "changed" = largest parent change. (v6 sorted by lowest parent change -> picked untouched groups.)
+    by_container = cand[np.argsort(-(kid_mean[cand] - par_change[cand]))]
+    by_changed = cand[np.argsort(-par_change[cand])]
     labels = coco_labels(image_list())
     base = {}
     for ls in labels:
@@ -659,8 +663,8 @@ def step6(L, n_show=8, n_top=50):
     img_p = {k: (v @ M).cpu().numpy() for k, v in img_c.items()}
     img_c = {k: v.cpu().numpy() for k, v in img_c.items()}
     fmt = lambda tl: ", ".join(f"{n} {s:.2f} (x{l:.1f})" for n, s, l in tl) or "-"
-    res = dict(layer=L, method="flat_meta", seed=0, n_candidates=int(len(cand)), stable=[], unstable=[])
-    for tag, sel in [("stable", order[:n_show]), ("unstable", order[::-1][:n_show])]:
+    res = dict(layer=L, method="flat_meta", seed=0, n_candidates=int(len(cand)), container=[], changed=[])
+    for tag, sel in [("container", by_container[:n_show]), ("changed", by_changed[:n_show])]:
         for j in sel:
             kids = np.where((gr == j) & alive)[0]
             kids = kids[np.argsort(-Sc[5].cpu().numpy()[kids])][:4]
@@ -672,12 +676,12 @@ def step6(L, n_show=8, n_top=50):
                                      top_it=top_labels(ti, labels, base, 1),
                                      top_img_overlap=len(set(tp) & set(ti)) / n_top))
             e = dict(parent=int(j), change=float(par_change[j]), n_children=int(n_kids[j]),
-                     children_mean_change=float(ch_change[(gr == j) & alive].mean()),
+                     children_mean_change=float(kid_mean[j]), container_score=float(kid_mean[j] - par_change[j]),
                      top_labels=top_labels(top, labels, base), children=kid_info)
             res[tag].append(e)
             kid_s = " / ".join(f"{(k['top_pt'][0][0] if k['top_pt'] else '-')}"
                                f"->{(k['top_it'][0][0] if k['top_it'] else '-')} {k['change']:.2f}" for k in kid_info)
-            print(f"  {tag.upper():8s} L{L} p{j}: change {e['change']:.2f} (children {e['children_mean_change']:.2f}, "
+            print(f"  {tag.upper():9s} L{L} p{j}: change {e['change']:.3f} (children {e['children_mean_change']:.3f}, "
                   f"n={e['n_children']}) | {fmt(e['top_labels'])} | kids pt->it: {kid_s}", flush=True)
     save_json(path, res)
     del Xp, Xi; free()
@@ -690,7 +694,7 @@ def step7(L, n_rand=20):
     """Per parent (>= 3 alive children, >= 500 firing tokens): container score = mean child change - parent change.
     Null: random groups with the same sizes. 'container' = score above the 95th percentile of the null scores;
     'rewired' = parent change >= 0.8. Seed 0, flat methods, all tokens, no bootstrap."""
-    path = f"{OUT}/families_L{L}.json"
+    path = f"{OUT}/families_v8_L{L}.json"
     if os.path.exists(path):
         print(f"skip families layer {L} (done)")
         return json.load(open(path))
@@ -732,14 +736,16 @@ def step7(L, n_rand=20):
         null_s = np.concatenate([sc for sc, _ in scores[1:]])
         null_p = np.concatenate([p for _, p in scores[1:]])
         thr = float(np.percentile(null_s, 95))
-        r = dict(n_parents=int(len(real_s)), threshold_95=thr,
+        thr_p = float(np.percentile(null_p, 95))  # v8: 'changed' = parent change above the null's 95th percentile
+        r = dict(n_parents=int(len(real_s)), threshold_95=thr, changed_threshold_95=thr_p,
+                 changed_share=float((real_p > thr_p).mean()), changed_share_null=float((null_p > thr_p).mean()),
                  container_share=float((real_s > thr).mean()), container_share_null=float((null_s > thr).mean()),
                  rewired_share=float((real_p >= 0.8).mean()), rewired_share_null=float((null_p >= 0.8).mean()),
                  score_median=float(np.median(real_s)), score_median_null=float(np.median(null_s)),
                  parent_change_quartiles=np.percentile(real_p, [25, 50, 75]).tolist())
         res[name] = r
         print(f"  FAMILIES L{L} {name}: n={r['n_parents']} | container {r['container_share']:.2f} (null "
-              f"{r['container_share_null']:.2f}) | rewired {r['rewired_share']:.2f} (null {r['rewired_share_null']:.2f}) | "
+              f"{r['container_share_null']:.2f}) | changed {r['changed_share']:.2f} (null {r['changed_share_null']:.2f}) | "
               f"score median {r['score_median']:+.3f} (null {r['score_median_null']:+.3f})", flush=True)
     save_json(path, res)
     del Xp, Xi; free()
