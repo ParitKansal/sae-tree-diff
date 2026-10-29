@@ -248,6 +248,35 @@ Same flat SAE + meta / k-means, trained on pt activations only. Excess (noise / 
   GemmaScope does NOT reconstruct image-token activations (FVU >= 0.58, > 1 at L12) -> GemmaScope results are
   uninformative either way; drop them as evidence (report as a failed fit).
 
+## v13: mechanism check + it-only SAE (Gemma, seed 0, 2026-10-29)
+Model-specific children (fire share > 0.8 in one model, >= 50 fires):
+- Mixed SAE: it-only 3-8%, pt-only 3-10% of children; pt-only SAE: it-only ~0 (1-9 latents), pt-only 1-4%.
+- it-only child has a pt-only sibling in the same family: meta BELOW random at all layers (0.43 vs 0.53, 0.50 vs
+  0.80, 0.30 vs 0.40); k-means mixed. rho(share of model-specific children, container score) -0.14..+0.15 (~0).
+  -> the 'pt-twin / it-twin under one parent' mechanism is NOT supported.
+
+it-only SAE (mirror of v12). Excess (noise / shuffled):
+
+| Layer | meta | k-means | fvu pt / it |
+|---|---|---|---|
+| 12 | -0.013 / -0.019 | -0.034 / -0.031 | 0.396 / 0.223 |
+| 20 | -0.001 / -0.023 | -0.002 / -0.016 | 0.472 / 0.244 |
+| 28 | +0.004 / -0.042 | +0.006 / -0.026 | 0.396 / 0.237 |
+
+- Shuffled null 6/6 negative; noise null negative only at L12 (about 0 at L20 / L28).
+- ASYMMETRY: families from a dictionary that saw it activations (mixed: strong; it-only: moderate) show stable
+  parents; families from a pt-only dictionary do not (10/12 >= 0). Fit gaps are symmetric (pt-only on it
+  0.42-0.50; it-only on pt 0.40-0.47), so fit quality alone does not explain it.
+
+## Summary after v13 (decision)
+'Stable parents' is not a robust fact about the model: it depends on which activations the dictionary was trained
+on (mixed > it-only > pt-only = none). GemmaScope (pt text) does not fit image tokens (uninformative).
+Matryoshka (mixed): shuffled 6/6 negative, Gemma noise 3/3 positive. Single seed for all controls.
+Lit review round 3: shared-dictionary artifacts are known for crosscoders (Minder et al. 2025); hierarchy-level
+version and this asymmetry not found. Decision (rule set before v13): mechanism unclear -> STOP main line.
+Optional: short LessWrong post on the dictionary dependence; optional cheap replication of the pt-only / it-only
+asymmetry on Qwen2-VL (cell_qwen2vl.py v13, ~45 min) before posting.
+
 ## Open / next
 - Gemma v10 onecell.py (LM site) rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
 - Third SAE seed: done in both models (72/72).
