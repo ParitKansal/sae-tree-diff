@@ -126,5 +126,12 @@ Excess = real P-R minus null P-R, flat methods (meta / kmeans):
 All 24 cells negative (range -0.018 to -0.069). Bootstrap CIs on each P-R are about +/-0.002, so seed and null
 choice matter more than sampling. Exploratory; one model pair (Gemma-3-4B pt vs it), LM layers, COCO images.
 
+- v7: faster image step (CPU preprocessing in a background thread, one GPU->CPU copy per layer per batch;
+  activations checked identical to v6 on the tiny model, max abs diff 0.0), Qwen2-VL support
+  (`cell_qwen2vl.py`: Qwen/Qwen2-VL-2B vs -Instruct, images resized to 448x448 = 256 image tokens, LM layers
+  10/16/23, results in `MyDrive/sae_tree_diff/w2_qwen2vl/`), and step 7 family count (`families_L*.json`):
+  share of parents whose container score (mean child change - parent change) beats the 95th percentile of
+  size-matched random groups, and share with parent change >= 0.8. Planted test: container 0.31-0.41 vs null 0.05.
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).

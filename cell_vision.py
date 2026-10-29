@@ -9,13 +9,14 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v6 (2026-10-29): v5 + 2nd SAE seed (flat methods, both nulls) + which parents are stable (COCO labels)"
+VERSION = "v7 (2026-10-29): v6 + Qwen2-VL support, faster image step (prefetch thread, one GPU->CPU copy), family count"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # site "lm" = language-model layers at the image tokens; "vision" = vision-tower layers (SAE++ used layer 26)
-CONFIG = dict(name="w1_vision", site="vision", pt="google/gemma-3-4b-pt", it="google/gemma-3-4b-it", layers=[13, 26],
-              n_images=5000, tok_per_image=32, batch=16, n1=4096, k1=32, n2=256, k2=2, alpha=1.0,
+# family "gemma3": prompt = BOS + image block; "qwen2vl": images resized to 448x448 (= 256 image tokens each)
+CONFIG = dict(name="w1_vision", site="vision", family="gemma3", pt="google/gemma-3-4b-pt", it="google/gemma-3-4b-it",
+              layers=[13, 26], n_images=5000, tok_per_image=32, batch=16, n1=4096, k1=32, n2=256, k2=2, alpha=1.0,
               steps=4000, sae_batch=4096, lr=3e-4, n_blocks=100, n_boot=500, n_rand=5, min_fires=20,
               extra_seeds=[1], inspect_layers=[20])
 
@@ -23,6 +24,7 @@ LOCAL = os.environ.get("LOCAL_TEST") == "1"
 if LOCAL:
     OUT = os.environ.get("OUT", "/tmp/saetree")
     CONFIG["site"] = os.environ.get("SITE", CONFIG["site"])
+    CONFIG["family"] = os.environ.get("FAMILY", CONFIG["family"])
     CONFIG.update(layers=[1, 2] if CONFIG["site"] == "vision" else [1, 3], n_images=3000, tok_per_image=4, batch=50, n1=256, k1=4, n2=32, steps=1500,
                   sae_batch=1024, n_blocks=30, n_boot=100, inspect_layers=[3])
 else:
@@ -61,10 +63,37 @@ def save_json(path, obj):
 
 
 # ---------------------------------------------------------------- models and inputs
+def tiny_qwen2vl():
+    from transformers import Qwen2VLConfig
+    c = Qwen2VLConfig.from_pretrained("Qwen/Qwen2-VL-2B")
+    tc = dict(hidden_size=64, intermediate_size=128, num_hidden_layers=4, num_attention_heads=2, num_key_value_heads=1,
+              vocab_size=c.text_config.vocab_size, rope_scaling={"type": "mrope", "mrope_section": [4, 6, 6]})
+    vc = dict(depth=2, embed_dim=32, hidden_size=64, num_heads=2, mlp_ratio=2, patch_size=14, spatial_merge_size=2,
+              temporal_patch_size=2, in_chans=3)
+    return Qwen2VLConfig(text_config=tc, vision_config=vc, image_token_id=c.image_token_id,
+                         vision_start_token_id=c.vision_start_token_id, video_token_id=c.video_token_id)
+
+
+def get_processor(repo):
+    from transformers import AutoProcessor
+    if CONFIG["family"] == "qwen2vl":
+        return AutoProcessor.from_pretrained(repo, min_pixels=448 * 448, max_pixels=448 * 448)
+    return AutoProcessor.from_pretrained(repo)
+
+
 def load_model(which):
-    from transformers import Gemma3ForConditionalGeneration
+    from transformers import AutoModelForImageTextToText
+    if LOCAL and CONFIG["family"] == "qwen2vl":  # tiny random Qwen2-VL + the real processor (not gated)
+        torch.manual_seed(0)
+        m = AutoModelForImageTextToText.from_config(tiny_qwen2vl())
+        if which == "it":
+            with torch.no_grad():
+                for n, p in m.named_parameters():
+                    if "language_model" in n:
+                        p.add_(0.3 * p.std() * torch.randn_like(p))
+        return m.eval(), get_processor("Qwen/Qwen2-VL-2B")
     if LOCAL:  # tiny random Gemma3; "it" = "pt" with its language model perturbed, vision kept equal
-        from transformers import Gemma3Config
+        from transformers import Gemma3Config, Gemma3ForConditionalGeneration
         c = Gemma3Config(text_config=dict(hidden_size=64, intermediate_size=128, num_hidden_layers=4,
                                           num_attention_heads=2, num_key_value_heads=1, head_dim=32,
                                           vocab_size=300, sliding_window=16),
@@ -79,12 +108,11 @@ def load_model(which):
                     if "language_model" in n:
                         p.add_(0.3 * p.std() * torch.randn_like(p))
         return m.eval(), None
-    from transformers import AutoProcessor
     repo = CONFIG[which]
     v = tuple(int(p) for p in transformers.__version__.split(".")[:2])
     kw = {"dtype": torch.bfloat16} if v >= (4, 56) else {"torch_dtype": torch.bfloat16}  # renamed in 4.56
-    m = Gemma3ForConditionalGeneration.from_pretrained(repo, device_map=DEV, **kw).eval()
-    return m, AutoProcessor.from_pretrained(repo)
+    m = AutoModelForImageTextToText.from_pretrained(repo, device_map=DEV, **kw).eval()
+    return m, get_processor(repo)
 
 
 def image_list():
@@ -100,6 +128,11 @@ def image_list():
 
 
 def make_inputs(model, proc, items):
+    if LOCAL and CONFIG["family"] == "qwen2vl":
+        from PIL import Image
+        g = np.random.default_rng(int(items[0]))
+        imgs = [Image.fromarray((g.random((448, 448, 3)) * 255).astype("uint8")) for _ in items]
+        return proc(text=["<|vision_start|><|image_pad|><|vision_end|>"] * len(items), images=imgs, return_tensors="pt")
     if LOCAL:
         c = model.config
         n = c.mm_tokens_per_image
@@ -108,11 +141,13 @@ def make_inputs(model, proc, items):
         return dict(input_ids=ids, token_type_ids=(ids == c.image_token_index).long(),
                     pixel_values=torch.randn(len(items), 3, 56, 56, generator=g))
     from PIL import Image
+    # the same raw input for both models (no chat template): image block first, so the image-token activations
+    # depend only on the image and the weights
+    if CONFIG["family"] == "qwen2vl":
+        imgs = [Image.open(p).convert("RGB").resize((448, 448), Image.BICUBIC) for p in items]
+        return proc(text=["<|vision_start|><|image_pad|><|vision_end|>"] * len(items), images=imgs, return_tensors="pt")
     imgs = [[Image.open(p).convert("RGB")] for p in items]
-    # the same raw input for both models (no chat template): BOS + image block; image tokens come first, so
-    # their activations depend only on the image and the weights
-    x = proc(text=["<start_of_image>"] * len(items), images=imgs, return_tensors="pt")
-    return {k: v.to(DEV) for k, v in x.items()}
+    return proc(text=["<start_of_image>"] * len(items), images=imgs, return_tensors="pt")  # + BOS
 
 
 # ---------------------------------------------------------------- step 1: vision weights equal?
@@ -120,8 +155,9 @@ def step1():
     path = f"{OUT}/step1_vision.json"
     if os.path.exists(path):
         return json.load(open(path))
-    part = lambda n: ("vision_tower" if "vision_tower" in n else "projector" if "multi_modal_projector" in n
-                      else "lm_layer0" if "layers.0." in n else None)
+    part = lambda n: ("projector" if ("multi_modal_projector" in n or "merger" in n) else
+                      "vision_tower" if ("vision_tower" in n or ".visual." in n) else
+                      "lm_layer0" if "layers.0." in n else None)
     m, _ = load_model("pt")
     ref = {n: p.detach().float().cpu() for n, p in m.named_parameters() if part(n)}
     del m; free()
@@ -156,10 +192,16 @@ def step2(which):
     bufs = {L: np.lib.format.open_memmap(paths[L] + ".part", "w+", np.float32, (len(items) * T, width))
             for L in CONFIG["layers"]}
     t0 = time.time()
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(2)  # decode + preprocess the next batches on CPU while the GPU runs this one
+    starts = list(range(0, len(items), B))
+    futs = {s: pool.submit(make_inputs, m, proc, items[s:s + B]) for s in starts[:2]}
     with torch.no_grad():
-        for s in range(0, len(items), B):
+        for k, s in enumerate(starts):
             chunk = items[s:s + B]
-            x = make_inputs(m, proc, chunk)
+            x = {kk: vv.to(DEV) for kk, vv in futs.pop(s).result().items()}
+            if k + 2 < len(starts):
+                futs[starts[k + 2]] = pool.submit(make_inputs, m, proc, items[starts[k + 2]:starts[k + 2] + B])
             if vision:  # vision tower only; hidden_states[L] = output of vision layer L (patch tokens)
                 hs = m.model.vision_tower(pixel_values=x["pixel_values"].to(m.dtype),
                                           output_hidden_states=True).hidden_states
@@ -168,12 +210,13 @@ def step2(which):
                 hs = m.model(**x, output_hidden_states=True).hidden_states  # m.model: no lm_head/logits
                 mask = x["input_ids"] == img_id
             n_img = int(mask[0].sum())
-            for i in range(len(chunk)):
-                # the same T image-token positions for both models (seeded by the image index)
-                pos = np.sort(np.random.default_rng(s + i).choice(n_img, T, replace=False))
-                rows = mask[i].nonzero().squeeze(1)[pos]
-                for L in CONFIG["layers"]:
-                    bufs[L][(s + i) * T:(s + i + 1) * T] = hs[L][i, rows].float().cpu().numpy()
+            # the same T image-token positions for both models (seeded by the image index); one GPU->CPU copy per layer
+            rows = torch.stack([mask[i].nonzero().squeeze(1)[torch.from_numpy(np.sort(
+                np.random.default_rng(s + i).choice(n_img, T, replace=False))).to(mask.device)]
+                for i in range(len(chunk))])
+            bidx = torch.arange(len(chunk), device=mask.device)[:, None]
+            for L in CONFIG["layers"]:
+                bufs[L][s * T:(s + len(chunk)) * T] = hs[L][bidx, rows].float().reshape(-1, width).cpu().numpy()
             if s % (B * 50) == 0:
                 print(f"  {which} {s + len(chunk)}/{len(items)} images, {time.time() - t0:.0f}s", flush=True)
     for L in CONFIG["layers"]:
@@ -184,6 +227,7 @@ def step2(which):
               f"median-dim max {np.median(top):.1f}", flush=True)
         a.flush(); del bufs[L], a
         os.replace(paths[L] + ".part", paths[L])
+    pool.shutdown()
     del m, hs, x, mask; free()
     if LOCAL and os.environ.get("SYNTH") == "1":  # replace with planted-tree data (known answer)
         for L in CONFIG["layers"]:
@@ -641,6 +685,67 @@ def step6(L, n_show=8, n_top=50):
     return res
 
 
+# ---------------------------------------------------------------- step 7: how many families are stable / rewired?
+def step7(L, n_rand=20):
+    """Per parent (>= 3 alive children, >= 500 firing tokens): container score = mean child change - parent change.
+    Null: random groups with the same sizes. 'container' = score above the 95th percentile of the null scores;
+    'rewired' = parent change >= 0.8. Seed 0, flat methods, all tokens, no bootstrap."""
+    path = f"{OUT}/families_L{L}.json"
+    if os.path.exists(path):
+        print(f"skip families layer {L} (done)")
+        return json.load(open(path))
+    Xp, Xi, big, _ = prep(L)
+    _, _, flat, meta2 = load_saes(fname("sae", L, 0), Xp.shape[1])
+    n1, n2 = CONFIG["n1"], CONFIG["n2"]
+    alive = (flat.since_fired <= 200).cpu().numpy()
+    res = dict(layer=L)
+    g = torch.Generator(device="cpu").manual_seed(3)
+    for name, (_, groups) in get_methods(None, None, flat, meta2).items():
+        gsets = [groups] + [groups[torch.randperm(n1, generator=g).to(DEV)] for _ in range(n_rand)]
+        Ms = []
+        for gg in gsets:
+            M = torch.zeros(n1, n2, device=DEV)
+            M[torch.arange(n1, device=DEV), gg] = 1
+            Ms.append(M)
+        Sc, Sg = 0, [0] * len(Ms)
+        with torch.no_grad():
+            for i in range(0, len(Xp), 8192):
+                zp, zi = flat.encode(Xp[i:i + 8192]), flat.encode(Xi[i:i + 8192])
+                st = lambda a, b: torch.stack([a.sum(0), b.sum(0), (a * a).sum(0), (b * b).sum(0), (a * b).sum(0),
+                                               (a > 0).sum(0).float(), (b > 0).sum(0).float(),
+                                               torch.full_like(a[0], len(a))]).double()
+                Sc = Sc + st(zp, zi)
+                for k, M in enumerate(Ms):
+                    Sg[k] = Sg[k] + st(zp @ M, zi @ M)
+        ch, okc = corr_change(Sc.cpu().numpy())
+        use = alive & okc
+        scores = []
+        for k, gg in enumerate(gsets):
+            gp, okp = corr_change(Sg[k].cpu().numpy())
+            fires = Sg[k][5].cpu().numpy()
+            gr = gg.cpu().numpy()
+            kids = np.bincount(gr[use], minlength=n2)
+            kid_mean = np.bincount(gr[use], weights=ch[use], minlength=n2) / np.maximum(kids, 1)
+            ok = okp & (kids >= 3) & (fires >= 500)
+            scores.append((kid_mean[ok] - gp[ok], gp[ok]))
+        real_s, real_p = scores[0]
+        null_s = np.concatenate([sc for sc, _ in scores[1:]])
+        null_p = np.concatenate([p for _, p in scores[1:]])
+        thr = float(np.percentile(null_s, 95))
+        r = dict(n_parents=int(len(real_s)), threshold_95=thr,
+                 container_share=float((real_s > thr).mean()), container_share_null=float((null_s > thr).mean()),
+                 rewired_share=float((real_p >= 0.8).mean()), rewired_share_null=float((null_p >= 0.8).mean()),
+                 score_median=float(np.median(real_s)), score_median_null=float(np.median(null_s)),
+                 parent_change_quartiles=np.percentile(real_p, [25, 50, 75]).tolist())
+        res[name] = r
+        print(f"  FAMILIES L{L} {name}: n={r['n_parents']} | container {r['container_share']:.2f} (null "
+              f"{r['container_share_null']:.2f}) | rewired {r['rewired_share']:.2f} (null {r['rewired_share_null']:.2f}) | "
+              f"score median {r['score_median']:+.3f} (null {r['score_median_null']:+.3f})", flush=True)
+    save_json(path, res)
+    del Xp, Xi; free()
+    return res
+
+
 # ---------------------------------------------------------------- run
 if __name__ == "__main__" or True:
     s1 = step1()
@@ -658,6 +763,8 @@ if __name__ == "__main__" or True:
         step5(L, "shuffle")
     for L in CONFIG["inspect_layers"]:
         step6(L)
+    for L in CONFIG["layers"]:
+        step7(L)
     for seed in CONFIG["extra_seeds"]:
         for L in CONFIG["layers"]:
             step34(L, seed)
