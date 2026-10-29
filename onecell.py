@@ -9,7 +9,7 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v12 (2026-10-29): v11 + control SAE trained on pt only + GemmaScope FVU without massive dims"
+VERSION = "v13 (2026-10-29): v12 + model-specific children check (mechanism) + control SAE trained on it only"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -964,13 +964,14 @@ def fvu_nobig(sae, X, big):
         return float(e.pow(2).sum(1).mean() / (Xs - Xs.mean(0))[:, ~big].pow(2).sum(1).mean())
 
 
-def step9_ptonly(L):
+def step9_ptonly(L, which="pt"):
     """Our SAEs are trained on the 50/50 pt+it mix, so they see both versions of every token and may give the
     pt-vs-it differences their own sibling latents (children swap, parent stays) -> stable parents by
     construction. Control: the same flat SAE + meta / k-means, trained on pt activations only, scored the same."""
-    path = f"{OUT}/ptonly_v12_L{L}.json"
+    path = f"{OUT}/ptonly_v12_L{L}.json" if which == "pt" else f"{OUT}/itonly_v13_L{L}.json"
+    tag = "PTONLY" if which == "pt" else "ITONLY"
     if os.path.exists(path):
-        print(f"skip pt-only layer {L} (done)")
+        print(f"skip {which}-only layer {L} (done)")
         return json.load(open(path))
     Xp, Xi, big, res = prep(L)
     ck = path.replace(".json", ".pt")
@@ -979,22 +980,24 @@ def step9_ptonly(L):
         flat, meta2 = TopK(Xp.shape[1], CONFIG["n1"], CONFIG["k1"]).to(DEV), TopK(Xp.shape[1], CONFIG["n2"], CONFIG["k2"]).to(DEV)
         flat.load_state_dict(st["flat"]); meta2.load_state_dict(st["meta2"])
     else:
-        print(f"  layer {L}: flat SAE on pt only", flush=True)
-        flat, _ = train(Xp, 0.0, seed=0)
-        _, meta2 = train(Xp, 0.0, sae1=flat, only_level2=True, seed=0)
+        print(f"  layer {L}: flat SAE on {which} only", flush=True)
+        Xt = Xp if which == "pt" else Xi
+        flat, _ = train(Xt, 0.0, seed=0)
+        _, meta2 = train(Xt, 0.0, sae1=flat, only_level2=True, seed=0)
+        del Xt
         torch.save(dict(flat=flat.state_dict(), meta2=meta2.state_dict()), ck)
     res.update(fvu_pt=fvu(flat, Xp), fvu_it=fvu(flat, Xi))
-    print(f"    pt-only SAE fvu pt {res['fvu_pt']:.3f} it {res['fvu_it']:.3f}", flush=True)
+    print(f"    {which}-only SAE fvu pt {res['fvu_pt']:.3f} it {res['fvu_it']:.3f}", flush=True)
     for name, (sae, groups) in get_methods(None, None, flat, meta2).items():
-        r = eval_pair(f"PTONLY L{L}", name, sae, groups, Xp, Xi)
+        r = eval_pair(f"{tag} L{L}", name, sae, groups, Xp, Xi)
         res[name] = r
         res[name + "_nulls"] = nulls_for(L, name, sae, groups, Xp, Xi, big, r["child_change"], 1.0)
         for k in ["noise", "shuffle"]:
-            print(f"  EXCESS PTONLY L{L} {name} over {k}: "
+            print(f"  EXCESS {tag} L{L} {name} over {k}: "
                   f"{r['parent_minus_random'] - res[name + '_nulls'][k]['parent_minus_random']:+.3f}", flush=True)
     save_json(path, res)
     del Xp, Xi; free()
-    print(f"DONE pt-only layer {L}", flush=True)
+    print(f"DONE {which}-only layer {L}", flush=True)
     return res
 
 
@@ -1009,6 +1012,80 @@ def gscope_fvu(L):
     print(f"  GemmaScope L{L} fvu without massive dims: pt {r['fvu_nobig_pt']:.3f} it {r['fvu_nobig_it']:.3f}", flush=True)
     save_json(path, r)
     del Xp, Xi, sae; free()
+
+
+# ---------------------------------------------------------------- step 10: mechanism - model-specific children
+def step10_specific(L, n_rand=20, thr=0.8, min_f=50):
+    """Mixed SAE (seed 0) and pt-only SAE: a child is pt-specific / it-specific if (fires_it - fires_pt) /
+    (fires_it + fires_pt) < -thr / > thr (>= min_f fires in total). If the mixed SAE splits a concept into a
+    pt-child and an it-child under one shared parent, (a) it has many model-specific children, (b) it-specific
+    children have a pt-specific sibling in the same family more often than in random groups of the same sizes,
+    and (c) families with more model-specific children have higher container scores."""
+    path = f"{OUT}/specific_v13_L{L}.json"
+    if os.path.exists(path):
+        print(f"skip model-specific children layer {L} (done)")
+        return json.load(open(path))
+    Xp, Xi, big, _ = prep(L)
+    d, n1, n2 = Xp.shape[1], CONFIG["n1"], CONFIG["n2"]
+    saes = {"mixed": load_saes(fname("sae", L, 0), d)[2:]}
+    ck = f"{OUT}/ptonly_v12_L{L}.pt"
+    if os.path.exists(ck):
+        st = torch.load(ck, map_location=DEV)
+        f, m = TopK(d, n1, CONFIG["k1"]).to(DEV), TopK(d, n2, CONFIG["k2"]).to(DEV)
+        f.load_state_dict(st["flat"]); m.load_state_dict(st["meta2"])
+        saes["ptonly"] = (f, m)
+    res = dict(layer=L, thr=thr, min_fires=min_f)
+    g = torch.Generator(device="cpu").manual_seed(4)
+    for sname, (flat, meta2) in saes.items():
+        for gname, groups in [("meta", parents_from_l2(flat, meta2)), ("kmeans", kmeans_groups(flat.W_dec.data, n2))]:
+            M = torch.zeros(n1, n2, device=DEV)
+            M[torch.arange(n1, device=DEV), groups] = 1
+            Sc = Sp = 0
+            with torch.no_grad():
+                for i in range(0, len(Xp), 8192):
+                    zp, zi = flat.encode(Xp[i:i + 8192]), flat.encode(Xi[i:i + 8192])
+                    st_ = lambda a, b: torch.stack([a.sum(0), b.sum(0), (a * a).sum(0), (b * b).sum(0), (a * b).sum(0),
+                                                    (a > 0).sum(0).float(), (b > 0).sum(0).float(),
+                                                    torch.full_like(a[0], len(a))]).double()
+                    Sc = Sc + st_(zp, zi); Sp = Sp + st_(zp @ M, zi @ M)
+            Sc, Sp = Sc.cpu().numpy(), Sp.cpu().numpy()
+            fp, fi = Sc[5], Sc[6]
+            tot = fp + fi
+            ok = tot >= min_f
+            spec = np.where(ok, (fi - fp) / np.maximum(tot, 1), 0.0)
+            is_it, is_pt = ok & (spec > thr), ok & (spec < -thr)
+            gr = groups.cpu().numpy()
+
+            def sib_rate(gg):  # share of it-specific children that have a pt-specific child in the same group
+                has_pt = np.bincount(gg[is_pt], minlength=n2) > 0
+                return float(has_pt[gg[is_it]].mean()) if is_it.any() else float("nan")
+
+            rand = [gr[torch.randperm(n1, generator=g).numpy()] for _ in range(n_rand)]
+            ch, okc = corr_change(Sc)
+            pc, okp = corr_change(Sp)
+            use = okc & ok
+            kids = np.bincount(gr[use], minlength=n2)
+            kid_mean = np.bincount(gr[use], weights=ch[use], minlength=n2) / np.maximum(kids, 1)
+            n_spec = np.bincount(gr[is_it | is_pt], minlength=n2)
+            n_ok = np.bincount(gr[ok], minlength=n2)
+            fam = okp & (kids >= 3) & (Sp[5] >= 500)
+            score = kid_mean - pc
+            share = n_spec / np.maximum(n_ok, 1)
+            rk = lambda v: np.argsort(np.argsort(v)).astype(float)  # Spearman = Pearson on ranks (ties rare)
+            rho = float(np.corrcoef(rk(share[fam]), rk(score[fam]))[0, 1]) if fam.sum() > 5 else float("nan")
+            r = dict(n_children=int(ok.sum()), it_specific=int(is_it.sum()), pt_specific=int(is_pt.sum()),
+                     it_specific_share=float(is_it.sum() / max(ok.sum(), 1)),
+                     pt_specific_share=float(is_pt.sum() / max(ok.sum(), 1)),
+                     sibling_rate=sib_rate(gr), sibling_rate_random=float(np.nanmean([sib_rate(x) for x in rand])),
+                     spearman_specific_share_vs_container_score=rho, n_families=int(fam.sum()))
+            res[f"{sname}_{gname}"] = r
+            print(f"  SPECIFIC L{L} {sname} {gname}: it-only children {r['it_specific']} ({r['it_specific_share']:.2f}), "
+                  f"pt-only {r['pt_specific']} ({r['pt_specific_share']:.2f}) | it-child has pt-sibling "
+                  f"{r['sibling_rate']:.2f} (random groups {r['sibling_rate_random']:.2f}) | rho(specific share, "
+                  f"container score) {rho:+.2f} (n={r['n_families']})", flush=True)
+    save_json(path, res)
+    del Xp, Xi; free()
+    return res
 
 
 # ---------------------------------------------------------------- run
@@ -1044,6 +1121,12 @@ if __name__ == "__main__" or True:
                 step5(L, "shuffle", seed)
         for L in CONFIG["layers"]:  # v12 control first: needs only our own code, decides how to read everything else
             step9_ptonly(L)
+            free()
+        for L in CONFIG["layers"]:  # v13: mechanism check (fast), then the mirror control (it-only SAE)
+            step10_specific(L)
+            free()
+        for L in CONFIG["layers"]:
+            step9_ptonly(L, "it")
             free()
         for L in CONFIG["layers"]:
             step8_matry(L)
