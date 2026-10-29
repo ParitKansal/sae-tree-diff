@@ -26,7 +26,8 @@ if LOCAL:
     CONFIG["site"] = os.environ.get("SITE", CONFIG["site"])
     CONFIG["family"] = os.environ.get("FAMILY", CONFIG["family"])
     CONFIG.update(layers=[1, 2] if CONFIG["site"] == "vision" else [1, 3], n_images=3000, tok_per_image=4, batch=50, n1=256, k1=4, n2=32, steps=1500,
-                  sae_batch=1024, n_blocks=30, n_boot=100, inspect_layers=[3])
+                  sae_batch=1024, n_blocks=30, n_boot=100)
+    CONFIG["inspect_layers"] = [CONFIG["layers"][-1]]
 else:
     from google.colab import drive
     drive.mount("/content/drive")

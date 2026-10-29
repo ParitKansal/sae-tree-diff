@@ -18,7 +18,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 CONFIG = dict(name="w1_vision", site="vision", family="gemma3", pt="google/gemma-3-4b-pt", it="google/gemma-3-4b-it",
               layers=[13, 26], n_images=5000, tok_per_image=32, batch=16, n1=4096, k1=32, n2=256, k2=2, alpha=1.0,
               steps=4000, sae_batch=4096, lr=3e-4, n_blocks=100, n_boot=500, n_rand=5, min_fires=20,
-              extra_seeds=[1, 2], inspect_layers=[20])
+              extra_seeds=[1, 2], inspect_layers=[26])
 
 LOCAL = os.environ.get("LOCAL_TEST") == "1"
 if LOCAL:
@@ -26,7 +26,8 @@ if LOCAL:
     CONFIG["site"] = os.environ.get("SITE", CONFIG["site"])
     CONFIG["family"] = os.environ.get("FAMILY", CONFIG["family"])
     CONFIG.update(layers=[1, 2] if CONFIG["site"] == "vision" else [1, 3], n_images=3000, tok_per_image=4, batch=50, n1=256, k1=4, n2=32, steps=1500,
-                  sae_batch=1024, n_blocks=30, n_boot=100, inspect_layers=[3])
+                  sae_batch=1024, n_blocks=30, n_boot=100)
+    CONFIG["inspect_layers"] = [CONFIG["layers"][-1]]
 else:
     from google.colab import drive
     drive.mount("/content/drive")

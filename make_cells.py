@@ -8,7 +8,8 @@ for x in (head, lay, insp):
 cells = {
     # vision tower of Gemma-3 (SigLIP, 27 layers, width 1152); 26 = the SAE++ site, 13 = middle
     "cell_vision.py": src.replace(head, head.replace('name="w1", site="lm"', 'name="w1_vision", site="vision"'))
-                         .replace(lay, lay.replace("[12, 20, 28]", "[13, 26]")),
+                         .replace(lay, lay.replace("[12, 20, 28]", "[13, 26]"))
+                         .replace(insp, insp.replace("[20]", "[26]")),
     # second model pair: Qwen2-VL-2B base vs Instruct (28 LM layers, width 1536; 10/16/23 = same relative depth as
     # Gemma 12/20/28 of 34). Not gated. Smaller model -> batch 32.
     "cell_qwen2vl.py": src.replace(head, 'CONFIG = dict(name="w2_qwen2vl", site="lm", family="qwen2vl", '
