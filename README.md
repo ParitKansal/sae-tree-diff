@@ -216,9 +216,19 @@ child fires with its parent 0.72-0.75 of the time). Excess = real P-R minus null
   under noise 0.15-0.32 vs real 0.35-0.56); Qwen 3/3 negative.
 - Coarse vs fine: real coarse change is about equal to the shuffled-null coarse change in both models -> no extra
   protection of Matryoshka's coarse latents beyond what a shuffled change gives.
-- GemmaScope 2 (16k_l0_small, raw activations), Gemma L12: gs_meta P-R +0.090 real vs +0.081 noise / +0.089 shuffled
-  -> excess +0.009 / +0.001 (no effect). FVU 0.066 printed is dominated by massive dim 443 (97.5% of variance at
-  L12) -> needs an FVU without dim 443 before reading GemmaScope as evidence. Rest pending.
+- GemmaScope 2 (google/gemma-scope-2-4b-pt, resid_post_all layer L-1, 16k_l0_small, raw activations, trained on
+  pt text). Excess (noise / shuffled):
+
+| Layer | gs_meta | gs_kmeans | fvu pt / it (incl. dim 443) |
+|---|---|---|---|
+| 12 | +0.009 / +0.001 | +0.064 / +0.047 | 0.066 / 0.079 |
+| 20 | +0.052 / +0.030 | -0.008 / -0.010 | 0.097 / 0.133 |
+| 28 | +0.029 / +0.003 | +0.023 / +0.002 | 0.253 / 0.437 |
+
+  10/12 excess >= 0: no stable-parent effect with GemmaScope (child change 0.62-0.72, higher than ours).
+  Printed FVU includes massive dim 443 (too optimistic); v12 adds FVU without it. Possible reasons: (a) text SAE
+  on image tokens; (b) our SAEs are trained on the pt+it mix and may give pt/it versions of a concept separate
+  sibling latents -> stable parents by construction. v12 control: same SAE trained on pt only.
 
 ## Open / next
 - Gemma v10 onecell.py (LM site) rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
