@@ -9,7 +9,7 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v2 (2026-10-29): float32 activations, no logits, massive dims removed before SAEs"
+VERSION = "v3 (2026-10-29): v2 + noise-matched null (pt vs pt+noise, same child change)"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -388,11 +388,7 @@ def fvu(sae, X):
         return float((Xs - sae(Xs)[0]).pow(2).sum(1).mean() / (Xs - Xs.mean(0)).pow(2).sum(1).mean())
 
 
-def step34(L):
-    path = f"{OUT}/result_v2_L{L}.json"  # v2 = with massive-dimension removal
-    if os.path.exists(path):
-        print(f"skip layer {L} (done)")
-        return json.load(open(path))
+def prep(L):
     Xp = torch.from_numpy(np.load(f"{ACT}/pt_{CONFIG['site']}{L}.npy")).to(DEV).float()
     Xi = torch.from_numpy(np.load(f"{ACT}/it_{CONFIG['site']}{L}.npy")).to(DEV).float()
     raw_cos = float(F.cosine_similarity(Xp, Xi, dim=1).mean())
@@ -406,19 +402,38 @@ def step34(L):
     Xp[:, big], Xi[:, big] = 0, 0
     scale = math.sqrt(Xp.shape[1]) / torch.cat([Xp, Xi]).norm(dim=1).mean()
     Xp, Xi = Xp * scale, Xi * scale
-    X = torch.cat([Xp, Xi])  # 50/50 mix
     print(f"  layer {L}: removed dims {big.nonzero().squeeze(1).tolist()} (share of centered variance {var_big:.3f})",
           flush=True)
-    res = dict(layer=L, raw_cos_pt_it=raw_cos, removed_dims=big.nonzero().squeeze(1).tolist(),
-               removed_var_share=var_big, config=CONFIG)
+    info = dict(layer=L, raw_cos_pt_it=raw_cos, removed_dims=big.nonzero().squeeze(1).tolist(),
+                removed_var_share=var_big, config=CONFIG)
+    return Xp, Xi, big, info
+
+
+def load_saes(ck, d):
+    st = torch.load(ck, map_location=DEV)
+    out = {}
+    for key, n, k in [("joint1", "n1", "k1"), ("joint2", "n2", "k2"), ("flat", "n1", "k1"), ("meta2", "n2", "k2")]:
+        out[key] = TopK(d, CONFIG[n], CONFIG[k]).to(DEV)
+        out[key].load_state_dict(st[key])
+    return out["joint1"], out["joint2"], out["flat"], out["meta2"]
+
+
+def get_methods(joint1, joint2, flat, meta2):
+    return {"saepp_joint": (joint1, parents_from_l2(joint1, joint2)),
+            "flat_meta": (flat, parents_from_l2(flat, meta2)),
+            "flat_kmeans": (flat, kmeans_groups(flat.W_dec.data, CONFIG["n2"]))}
+
+
+def step34(L):
+    path = f"{OUT}/result_v2_L{L}.json"  # v2 = with massive-dimension removal
+    if os.path.exists(path):
+        print(f"skip layer {L} (done)")
+        return json.load(open(path))
+    Xp, Xi, big, res = prep(L)
+    X = torch.cat([Xp, Xi])  # 50/50 mix
     ck = f"{OUT}/sae_v2_L{L}.pt"
     if os.path.exists(ck):
-        st = torch.load(ck, map_location=DEV)
-        d = X.shape[1]
-        joint1, joint2 = TopK(d, CONFIG["n1"], CONFIG["k1"]).to(DEV), TopK(d, CONFIG["n2"], CONFIG["k2"]).to(DEV)
-        flat, meta2 = TopK(d, CONFIG["n1"], CONFIG["k1"]).to(DEV), TopK(d, CONFIG["n2"], CONFIG["k2"]).to(DEV)
-        for mdl, key in [(joint1, "joint1"), (joint2, "joint2"), (flat, "flat"), (meta2, "meta2")]:
-            mdl.load_state_dict(st[key])
+        joint1, joint2, flat, meta2 = load_saes(ck, X.shape[1])
     else:
         print(f"  layer {L}: SAE++ (joint)", flush=True)
         joint1, joint2 = train(X, CONFIG["alpha"])
@@ -428,9 +443,8 @@ def step34(L):
         _, meta2 = train(X, 0.0, sae1=flat, only_level2=True)
         torch.save(dict(joint1=joint1.state_dict(), joint2=joint2.state_dict(), flat=flat.state_dict(),
                         meta2=meta2.state_dict()), ck)
-    methods = {"saepp_joint": (joint1, parents_from_l2(joint1, joint2)),
-               "flat_meta": (flat, parents_from_l2(flat, meta2)),
-               "flat_kmeans": (flat, kmeans_groups(flat.W_dec.data, CONFIG["n2"]))}
+    del X
+    methods = get_methods(joint1, joint2, flat, meta2)
     for name, (sae, groups) in methods.items():
         cc = torch.bincount(groups[sae.since_fired <= 200], minlength=CONFIG["n2"]).cpu().numpy()
         blocks = stats_blocks(sae, Xp, Xi, groups, CONFIG["n2"])
@@ -448,6 +462,63 @@ def step34(L):
     return res
 
 
+def child_change(sae, A, B):
+    """Mean change (1 - corr) over children that fire >= min_fires times in both."""
+    S = 0
+    with torch.no_grad():
+        for i in range(0, len(A), 8192):
+            a, b = sae.encode(A[i:i + 8192]), sae.encode(B[i:i + 8192])
+            S = S + torch.stack([a.sum(0), b.sum(0), (a * a).sum(0), (b * b).sum(0), (a * b).sum(0),
+                                 (a > 0).sum(0).float(), (b > 0).sum(0).float(),
+                                 torch.full_like(a[0], len(a))]).double()
+    ch, ok = corr_change(S.cpu().numpy())
+    return float(ch[ok].mean())
+
+
+def step5(L):
+    """Null: pt vs pt + isotropic noise, noise size chosen so the CHILD change equals the pt-vs-it child change.
+    If parent - random is about as negative here, the pt-vs-it gap is an SAE effect, not a fine-tuning effect."""
+    path = f"{OUT}/null_v2_L{L}.json"
+    if os.path.exists(path):
+        print(f"skip null layer {L} (done)")
+        return json.load(open(path))
+    real = json.load(open(f"{OUT}/result_v2_L{L}.json"))
+    Xp, Xi, big, _ = prep(L)
+    del Xi; free()
+    joint1, joint2, flat, meta2 = load_saes(f"{OUT}/sae_v2_L{L}.pt", Xp.shape[1])
+    g = torch.Generator(device=DEV).manual_seed(2)
+    noise = torch.randn(Xp.shape, generator=g, device=DEV)
+    noise[:, big] = 0
+    sub = slice(0, len(Xp) // 5)  # calibrate on the first 20% of images
+    res = dict(layer=L, note="pt vs pt+sigma*noise; sigma matched to the pt-vs-it child change per SAE")
+    sig_cache = {}
+    for name, (sae, groups) in get_methods(joint1, joint2, flat, meta2).items():
+        target = real[name]["child_change"]
+        key = id(sae)
+        if key not in sig_cache:  # bisection in log space
+            lo, hi = math.log(1e-3), math.log(10.0)
+            for _ in range(14):
+                mid = (lo + hi) / 2
+                c = child_change(sae, Xp[sub], Xp[sub] + math.exp(mid) * noise[sub])
+                lo, hi = (mid, hi) if c < target else (lo, mid)
+            sig_cache[key] = math.exp((lo + hi) / 2)
+        sigma = sig_cache[key]
+        Xn = Xp + sigma * noise
+        cc = torch.bincount(groups[sae.since_fired <= 200], minlength=CONFIG["n2"]).cpu().numpy()
+        r = summarize(stats_blocks(sae, Xp, Xn, groups, CONFIG["n2"]), cc)
+        r.update(sigma=sigma, target_child_change=target, real_parent_minus_random=real[name]["parent_minus_random"])
+        res[name] = r
+        del Xn; free()
+        print(f"  NULL L{L} {name}: sigma {sigma:.3f} child {r['child_change']:.3f} (target {target:.3f}) "
+              f"parent {r['parent_change']:.3f} random {r['random_group_change']:.3f} | "
+              f"null P-R {r['parent_minus_random']:+.3f} CI {r['parent_minus_random_ci'][0]:+.3f},"
+              f"{r['parent_minus_random_ci'][1]:+.3f} vs real {real[name]['parent_minus_random']:+.3f}", flush=True)
+    save_json(path, res)
+    del Xp, noise; free()
+    print(f"DONE null layer {L}", flush=True)
+    return res
+
+
 # ---------------------------------------------------------------- run
 if __name__ == "__main__" or True:
     s1 = step1()
@@ -458,6 +529,9 @@ if __name__ == "__main__" or True:
     step2("it")
     for L in CONFIG["layers"]:
         step34(L)
+        free()
+    for L in CONFIG["layers"]:
+        step5(L)
     print("\nALL DONE. Results in", OUT)
     print("Read: change = 1 - corr(pt, it). parent_minus_random < 0 with CI below 0 -> real parents are more "
           "stable than random groups of the same size (fine-tuning moves children inside stable parents).")

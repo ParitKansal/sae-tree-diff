@@ -48,5 +48,12 @@ methods (not only SAE++). Otherwise: parents and children change about equally -
   (median-dim max 42 / 198 / 760) = Gemma massive activations. v2 preprocessing: center with the shared pt+it
   mean, zero dims with std > 10x median dim std, scale. Results named `result_v2_L*.json`.
 
+- 2026-10-29 w1 v2 L12 (Gemma-3-4B pt vs it, LM layer 12; removed dim 443 = 97.5% of centered variance):
+  saepp_joint child 0.353 parent 0.300 random 0.346, P-R -0.047 [-0.050,-0.043], sibling cos 0.73, FVU 0.34/0.37;
+  flat_meta P-R -0.110 [-0.111,-0.109]; flat_kmeans P-R -0.132 [-0.133,-0.130]; flat sibling cos 0.09-0.11,
+  FVU 0.21/0.24. Caveat: TopK switching between similar sibling latents can produce this without any
+  fine-tuning effect -> v3 adds a noise-matched null (pt vs pt+noise with the same child change). On planted
+  data the noise null gives about half the planted gap (-0.035 vs -0.075), so this control matters.
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).
