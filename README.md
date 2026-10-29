@@ -148,9 +148,14 @@ choice matter more than sampling. Exploratory; one model pair (Gemma-3-4B pt vs 
 | 16 | 1 | -0.007 / -0.009 | -0.005 / -0.006 |
 | 23 | 0 | -0.006 / -0.006 | -0.005 / -0.005 |
 | 23 | 1 | -0.007 / -0.006 | -0.005 / -0.004 |
+| 10 | 2 | -0.006 / -0.007 | -0.004 / -0.006 |
+| 16 | 2 | -0.007 / -0.008 | -0.007 / -0.006 |
+| 23 | 2 | -0.006 / -0.006 | -0.005 / -0.004 |
 
-  All 24 negative (-0.004 to -0.009), i.e. 12-41% of the child change (Gemma: 3-16%). Shuffled sigma 0.94-1.12
-  (real it-pt differences at about natural size). Two models together: 48 of 48 cells negative.
+  Seeds 0-1: all 24 negative (-0.004 to -0.009), i.e. 12-41% of the child change (Gemma: 3-16%). Shuffled sigma
+  0.94-1.12 (real it-pt differences at about natural size). Two models together: 48 of 48 cells negative.
+  Seed 2 (v9, 2026-10-29): all 12 negative (-0.004 to -0.008); Qwen 3 seeds: 36 of 36 negative. Real P-R s2
+  meta / kmeans: L10 -0.005/-0.009, L16 -0.006/-0.012, L23 -0.011/-0.014; sib cos 0.07-0.09.
 - Families (v7 step 7): container share 0.10/0.07 (L10), 0.08/0.07 (L16), 0.19/0.19 (L23) vs null 0.05.
   v7 'rewired' (parent change >= 0.8) is 0 everywhere (absolute threshold does not fit Qwen) -> v8 relative rule.
 - Most-changed families at L16 include bathroom (toilet x14.1, sink x7.0) and food (broccoli x23.9, carrot x23.5),
@@ -166,7 +171,7 @@ choice matter more than sampling. Exploratory; one model pair (Gemma-3-4B pt vs 
 
 ## Open / next
 - Gemma v8 rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
-- Third SAE seed in both models (extra_seeds=[1, 2]) for final numbers.
+- Third SAE seed: Qwen done (36/36); Gemma still to run (v9 onecell.py).
 - Independent code check before any release.
 
 ## Before any public release
