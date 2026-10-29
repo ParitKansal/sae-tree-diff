@@ -387,18 +387,29 @@ def fvu(sae, X):
 
 
 def step34(L):
-    path = f"{OUT}/result_L{L}.json"
+    path = f"{OUT}/result_v2_L{L}.json"  # v2 = with massive-dimension removal
     if os.path.exists(path):
         print(f"skip layer {L} (done)")
         return json.load(open(path))
     Xp = torch.from_numpy(np.load(f"{ACT}/pt_{CONFIG['site']}{L}.npy")).to(DEV).float()
     Xi = torch.from_numpy(np.load(f"{ACT}/it_{CONFIG['site']}{L}.npy")).to(DEV).float()
     raw_cos = float(F.cosine_similarity(Xp, Xi, dim=1).mean())
+    # Gemma has a few "massive" dimensions (values up to ~2e5 vs ~1e2 elsewhere) that would dominate the SAE:
+    # center with the shared pt+it mean, zero dims whose std > 10x the median dim std, then scale (same for both)
+    mu = (Xp.mean(0) + Xi.mean(0)) / 2
+    Xp, Xi = Xp - mu, Xi - mu
+    sd = torch.sqrt((Xp.pow(2).mean(0) + Xi.pow(2).mean(0)) / 2)
+    big = sd > 10 * sd.median()
+    var_big = float(sd[big].pow(2).sum() / sd.pow(2).sum())
+    Xp[:, big], Xi[:, big] = 0, 0
     scale = math.sqrt(Xp.shape[1]) / torch.cat([Xp, Xi]).norm(dim=1).mean()
     Xp, Xi = Xp * scale, Xi * scale
     X = torch.cat([Xp, Xi])  # 50/50 mix
-    res = dict(layer=L, raw_cos_pt_it=raw_cos, config=CONFIG)
-    ck = f"{OUT}/sae_L{L}.pt"
+    print(f"  layer {L}: removed dims {big.nonzero().squeeze(1).tolist()} (share of centered variance {var_big:.3f})",
+          flush=True)
+    res = dict(layer=L, raw_cos_pt_it=raw_cos, removed_dims=big.nonzero().squeeze(1).tolist(),
+               removed_var_share=var_big, config=CONFIG)
+    ck = f"{OUT}/sae_v2_L{L}.pt"
     if os.path.exists(ck):
         st = torch.load(ck, map_location=DEV)
         d = X.shape[1]

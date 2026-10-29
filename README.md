@@ -43,5 +43,10 @@ methods (not only SAE++). Otherwise: parents and children change about equally -
   (vision_tower / projector / lm_layer0) with relative change ||w_it - w_pt|| / ||w_pt||.
   Results: `MyDrive/sae_tree_diff/w1_vision/`. Rebuild cells with `python3 make_cells.py`.
 
+- 2026-10-29 w1: activations had to be stored as float32 (float16 overflow), and the first OOM came from the
+  lm_head logits (fixed: m.model). `it` max |x|: L12 101k, L20 196k, L28 226k, always dims 443 and 1666
+  (median-dim max 42 / 198 / 760) = Gemma massive activations. v2 preprocessing: center with the shared pt+it
+  mean, zero dims with std > 10x median dim std, scale. Results named `result_v2_L*.json`.
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).
