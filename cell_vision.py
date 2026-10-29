@@ -9,7 +9,7 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v4 (2026-10-29): v3 + null calibrated on ALL tokens (v3 used 20% -> child change overshot)"
+VERSION = "v5 (2026-10-29): v4 + shuffled-difference null (pt + it-pt change of another random token)"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -475,30 +475,35 @@ def child_change(sae, A, B):
     return float(ch[ok].mean())
 
 
-def step5(L):
-    """Null: pt vs pt + isotropic noise, noise size chosen so the CHILD change equals the pt-vs-it child change.
-    If parent - random is about as negative here, the pt-vs-it gap is an SAE effect, not a fine-tuning effect."""
-    path = f"{OUT}/null_v4_L{L}.json"
+def step5(L, kind="noise"):
+    """Null: pt vs pt + sigma * D, sigma chosen so the CHILD change equals the pt-vs-it child change.
+    kind "noise": D = isotropic Gaussian. kind "shuffle": D = (it - pt) of ANOTHER random token (real kinds of
+    fine-tuning change, but not tied to this token's content). If parent - random is about as negative here,
+    the pt-vs-it gap is an SAE effect, not a token-specific fine-tuning effect."""
+    path = f"{OUT}/null_v4_L{L}.json" if kind == "noise" else f"{OUT}/shuf_v5_L{L}.json"
     if os.path.exists(path):
         print(f"skip null layer {L} (done)")
         return json.load(open(path))
     real = json.load(open(f"{OUT}/result_v2_L{L}.json"))
     Xp, Xi, big, _ = prep(L)
-    del Xi; free()
     joint1, joint2, flat, meta2 = load_saes(f"{OUT}/sae_v2_L{L}.pt", Xp.shape[1])
     g = torch.Generator(device=DEV).manual_seed(2)
-    noise = torch.randn(Xp.shape, generator=g, device=DEV)
+    if kind == "noise":
+        noise = torch.randn(Xp.shape, generator=g, device=DEV)
+    else:  # it - pt of a random other token (permutation over all tokens; big dims are already 0 in both)
+        noise = (Xi - Xp)[torch.randperm(len(Xp), generator=g, device=DEV)]
+    del Xi; free()
     noise[:, big] = 0
     # calibrate on ALL tokens: the "fires >= min_fires" filter must select the same children as in the result
     # (v3 used 20% of the images -> rarer children dropped -> child change overshot: 0.503 vs target 0.353)
     sub = slice(None)
-    res = dict(layer=L, note="pt vs pt+sigma*noise; sigma matched to the pt-vs-it child change per SAE")
+    res = dict(layer=L, kind=kind, note="pt vs pt+sigma*D; sigma matched to the pt-vs-it child change per SAE")
     sig_cache = {}
     for name, (sae, groups) in get_methods(joint1, joint2, flat, meta2).items():
         target = real[name]["child_change"]
         key = id(sae)
         if key not in sig_cache:  # bisection in log space
-            lo, hi = math.log(1e-3), math.log(10.0)
+            lo, hi = math.log(1e-3), math.log(10.0 if kind == "noise" else 5.0)
             for _ in range(12):
                 mid = (lo + hi) / 2
                 c = child_change(sae, Xp[sub], Xp[sub] + math.exp(mid) * noise[sub])
@@ -511,13 +516,13 @@ def step5(L):
         r.update(sigma=sigma, target_child_change=target, real_parent_minus_random=real[name]["parent_minus_random"])
         res[name] = r
         del Xn; free()
-        print(f"  NULL L{L} {name}: sigma {sigma:.3f} child {r['child_change']:.3f} (target {target:.3f}) "
+        print(f"  {'NULL' if kind == 'noise' else 'SHUF'} L{L} {name}: sigma {sigma:.3f} child {r['child_change']:.3f} (target {target:.3f}) "
               f"parent {r['parent_change']:.3f} random {r['random_group_change']:.3f} | "
               f"null P-R {r['parent_minus_random']:+.3f} CI {r['parent_minus_random_ci'][0]:+.3f},"
               f"{r['parent_minus_random_ci'][1]:+.3f} vs real {real[name]['parent_minus_random']:+.3f}", flush=True)
     save_json(path, res)
     del Xp, noise; free()
-    print(f"DONE null layer {L}", flush=True)
+    print(f"DONE {kind} null layer {L}", flush=True)
     return res
 
 
@@ -534,6 +539,8 @@ if __name__ == "__main__" or True:
         free()
     for L in CONFIG["layers"]:
         step5(L)
+    for L in CONFIG["layers"]:
+        step5(L, "shuffle")
     print("\nALL DONE. Results in", OUT)
     print("Read: change = 1 - corr(pt, it). parent_minus_random < 0 with CI below 0 -> real parents are more "
           "stable than random groups of the same size (fine-tuning moves children inside stable parents).")
