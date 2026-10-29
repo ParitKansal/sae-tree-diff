@@ -157,5 +157,17 @@ choice matter more than sampling. Exploratory; one model pair (Gemma-3-4B pt vs 
   as in Gemma L20 (sink x10.2, toilet x9.4; broccoli x16.9, carrot x14.8). Hint only (8 groups per model).
   v7 'STABLE' examples were untouched groups (change 0.00), not containers -> v8 picks by container score.
 
+- v8 (Qwen, 2026-10-29): families_v8: container share 0.10/0.07 (L10), 0.08/0.07 (L16), 0.19/0.19 (L23) vs null
+  0.05; 'changed' share (parent change above null 95th pct) 0.01/0.02, 0.04/0.02, 0.04/0.01 vs null 0.05 ->
+  real families are rarely more changed than random groups; no separate 'rewired' class in Qwen.
+  parents_v8 L16 container examples: parent change 0.004-0.023 while children change 0.047-0.064; mostly indoor
+  table scenes (cup/table/chair x2-2.6), cars (x1.9-2.1), one food family (sandwich x10.2, cake x8.1).
+  Most changed (unchanged list): bathroom, broccoli/carrot, kite, surfing/boats.
+
+## Open / next
+- Gemma v8 rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
+- Third SAE seed in both models (extra_seeds=[1, 2]) for final numbers.
+- Independent code check before any release.
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).
