@@ -9,7 +9,7 @@
 #         parents (sum of their children), and random groups of the same sizes (null). Block bootstrap over images.
 # Results go to Google Drive (finished steps are skipped on a rerun); the GPU is turned off at the end.
 import os, json, math, time, gc
-VERSION = "v3 (2026-10-29): v2 + noise-matched null (pt vs pt+noise, same child change)"
+VERSION = "v4 (2026-10-29): v3 + null calibrated on ALL tokens (v3 used 20% -> child change overshot)"
 print("=" * 80, f"\nonecell.py {VERSION}\n" + "=" * 80, flush=True)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
@@ -478,7 +478,7 @@ def child_change(sae, A, B):
 def step5(L):
     """Null: pt vs pt + isotropic noise, noise size chosen so the CHILD change equals the pt-vs-it child change.
     If parent - random is about as negative here, the pt-vs-it gap is an SAE effect, not a fine-tuning effect."""
-    path = f"{OUT}/null_v2_L{L}.json"
+    path = f"{OUT}/null_v4_L{L}.json"
     if os.path.exists(path):
         print(f"skip null layer {L} (done)")
         return json.load(open(path))
@@ -489,7 +489,9 @@ def step5(L):
     g = torch.Generator(device=DEV).manual_seed(2)
     noise = torch.randn(Xp.shape, generator=g, device=DEV)
     noise[:, big] = 0
-    sub = slice(0, len(Xp) // 5)  # calibrate on the first 20% of images
+    # calibrate on ALL tokens: the "fires >= min_fires" filter must select the same children as in the result
+    # (v3 used 20% of the images -> rarer children dropped -> child change overshot: 0.503 vs target 0.353)
+    sub = slice(None)
     res = dict(layer=L, note="pt vs pt+sigma*noise; sigma matched to the pt-vs-it child change per SAE")
     sig_cache = {}
     for name, (sae, groups) in get_methods(joint1, joint2, flat, meta2).items():
@@ -497,7 +499,7 @@ def step5(L):
         key = id(sae)
         if key not in sig_cache:  # bisection in log space
             lo, hi = math.log(1e-3), math.log(10.0)
-            for _ in range(14):
+            for _ in range(12):
                 mid = (lo + hi) / 2
                 c = child_change(sae, Xp[sub], Xp[sub] + math.exp(mid) * noise[sub])
                 lo, hi = (mid, hi) if c < target else (lo, mid)

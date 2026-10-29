@@ -55,5 +55,11 @@ methods (not only SAE++). Otherwise: parents and children change about equally -
   fine-tuning effect -> v3 adds a noise-matched null (pt vs pt+noise with the same child change). On planted
   data the noise null gives about half the planted gap (-0.035 vs -0.075), so this control matters.
 
+- 2026-10-29 w1 v2 L20 (dim 443 removed, 94.6%): saepp P-R -0.028 [-0.030,-0.025] sib cos 0.70 FVU 0.39/0.41;
+  flat_meta -0.098 [-0.099,-0.097]; flat_kmeans -0.109; child change 0.674 (flat). L28 (dim 443, 68.8%): saepp
+  -0.034, sib cos 0.70, FVU 0.43/0.45; flat_meta -0.094; flat_kmeans -0.112; child 0.602. Same pattern at all
+  3 layers. v3 null was mis-calibrated (20% subset -> child 0.503 vs target 0.353); v4 calibrates on all tokens
+  (exact match on planted data), files `null_v4_L*.json`.
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).
