@@ -98,5 +98,16 @@ look at what the stable parents are (top images).
   (>= 3 children, >= 500 firing tokens) with the COCO labels over-represented in their top-50 images, and each
   child's top label in pt -> it.
 
+- 2026-10-29 v6 seed 1 (flat methods): excess over noise / shuffled null (meta, kmeans):
+  L12 -0.053, -0.068 / -0.039, -0.037 (seed 0: -0.053, -0.066 / -0.036, -0.029);
+  L20 -0.042, -0.043 / -0.041, -0.036 (seed 0: -0.045, -0.051 / -0.047, -0.052). Replicates across SAE seeds.
+- v6 parents L20 (flat_meta seed 0; 8 most / least stable of the candidates): two kinds of groups.
+  Stable: parent change 0.06-0.15 while children change 0.36-0.63 (re-routing inside the group); clear
+  labels for some: baseball (glove x22, bat x15.5, ball x10.7), vehicles (truck x4.4, car x3.0), train (x7.0, x6.4);
+  others only person/dining table near base rate. Unstable: parent 0.89-0.94 with children 0.87-0.95 (whole
+  group rewired); labels: food (broccoli x16.9, carrot x14.8), bathroom (sink x10.2, toilet x9.4), tennis x9.6,
+  desk (mouse x11.4, laptop x6.0). Hint only (16 groups): outdoor/vehicle/sport stable, food/indoor rewired.
+  Caveat: child top-label pt->it is noisy (e.g. children with change 0.02 whose label flips) -> do not over-read.
+
 ## Before any public release
 Independent code check (blind rebuild in a fresh Desktop folder, then compare).
