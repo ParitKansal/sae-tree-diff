@@ -1,316 +1,171 @@
-# sae-tree-diff
+# Stable SAE hierarchies after instruction tuning depend on the dictionary
 
-**Status: STOPPED (2026-10-29). Exploratory project; negative / cautionary result.**
+**Status: stopped (2026-10-29). Exploratory project with a negative / cautionary result.**
 
-## Summary
-Question: when a vision-language model is instruction-tuned, do broad SAE concepts (parents) stay stable while
-narrow ones (children) change? Models: Gemma-3-4B pt vs it, Qwen2-VL-2B base vs Instruct; COCO val2017 image
-tokens; LM layers 12/20/28 (Gemma) and 10/16/23 (Qwen). Metric: change = 1 - corr(pt, it) per latent; parent =
-sum of its children; compared with random groups of the same sizes and with two nulls (matched Gaussian noise,
-shuffled real it-pt differences).
+## TL;DR
+
+- I asked whether instruction tuning a vision-language model changes *broad* SAE concepts (parents) or *narrow*
+  ones (children).
+- With the usual setup (one SAE trained on activations from both the base and the tuned model), the answer
+  looked clean: parent families were more stable than random groups of the same size in **72 of 72** checks.
+  That covered 2 model families, 3 layers, 2 grouping methods, 2 null models and 3 SAE seeds.
+- One control removed it. **The same SAE trained on base-model activations only shows no stable-parent effect**
+  (10 of 12 checks at or above zero).
+- An SAE trained on tuned-model activations only shows a moderate effect. A Matryoshka SAE gives mixed results.
+- So "parents stay stable" is not a robust fact about the model in this setup. It depends on which activations
+  the dictionary was trained on.
+- Practical lesson for SAE model diffing: **always run a base-only dictionary control.**
+
+## 1. Question
+
+Instruction tuning changes a model, but which kind of concept does it change: general ones ("animal", "food")
+or specific ones ("husky", "broccoli")? SAE++ (arXiv 2606.16193) builds two-level concept trees by training a
+second SAE on the decoder directions of a first SAE. That suggested a direct test: build a concept tree, then
+compare how much **parent** concepts and **child** concepts change between the base and the tuned model.
+
+## 2. Setup
+
+| Item | Choice |
+|---|---|
+| Model pairs | Gemma-3-4B `pt` vs `it`; Qwen2-VL-2B base vs Instruct |
+| Data | COCO val2017, first 5000 images; 32 fixed image-token positions per image; same raw input for both models (image block, no chat template) |
+| Sites | Language-model residual stream at the image tokens. Gemma layers 12/20/28; Qwen 10/16/23 (same relative depth). |
+| Preprocessing | Center with the shared pt+it mean, zero "massive" dimensions (std > 10x the median; Gemma dim 443, Qwen dim 1073), rescale |
+| Level-1 SAE | TopK, 4096 latents, k = 32, AuxK for dead latents |
+| Parents (256 groups) | (a) "meta": a second TopK SAE (k = 2) trained on the level-1 decoder rows; (b) k-means on decoder rows; (c) SAE++ joint training |
+| Change metric | change = 1 - corr(base activation, tuned activation) over the same tokens; a parent's activation = sum of its children |
+| Test statistic | P-R = mean parent change minus mean change of random groups with the same sizes. Negative = families more stable than chance. |
+| Nulls | Base vs base + sigma·D, with sigma set so the *child* change matches the real one. D = Gaussian noise, or D = the real (tuned - base) difference of a **random other token** ("shuffled"). |
+| Excess | real P-R minus null P-R. Negative = more family stability than the null explains. |
+| Uncertainty | Block bootstrap over images (100 blocks) |
+
+## 3. The first result looked strong
+
+With one SAE trained on a 50/50 mix of base and tuned activations:
+
+| Model | Child change | Excess over nulls (meta and k-means, both nulls, 3 seeds) |
+|---|---|---|
+| Gemma-3-4B | 0.35-0.68 | all 36 negative, -0.018 to -0.069 |
+| Qwen2-VL-2B | 0.02-0.04 | all 36 negative, -0.004 to -0.009 |
+
+The pattern held in both models, at every layer, for both grouping methods, against both nulls and over 3 SAE
+seeds. Examples looked sensible too. At Gemma layer 20, "container" families (children change, parent stays)
+included baseball scenes (top-image labels baseball glove x22, bat x15 over base rate), with children re-labelled
+inside the family (frisbee -> sports ball, hot dog -> pizza).
+
+SAE++ joint training made sibling decoders near-copies (median sibling cosine 0.70-0.73 vs 0.04-0.11 for
+post-hoc groups) and gave worse reconstruction, so I relied on the post-hoc trees.
+
+## 4. The control that changed the conclusion
+
+All SAEs above were trained on activations from **both** models. A dictionary like that has seen both versions
+of every token, so it might create the family structure it then reports. The control: the same SAE and grouping,
+trained on **one** model's activations only, scored the same way (Gemma, seed 0).
+
+**Base-only (pt) dictionary.** Excess, noise / shuffled:
+
+| Layer | meta | k-means | FVU on pt / it |
+|---|---|---|---|
+| 12 | +0.028 / +0.027 | +0.003 / +0.019 | 0.19 / 0.42 |
+| 20 | +0.029 / +0.015 | +0.028 / +0.023 | 0.21 / 0.50 |
+| 28 | +0.020 / -0.007 | +0.007 / -0.006 | 0.19 / 0.43 |
+
+**Tuned-only (it) dictionary:**
+
+| Layer | meta | k-means | FVU on pt / it |
+|---|---|---|---|
+| 12 | -0.013 / -0.019 | -0.034 / -0.031 | 0.40 / 0.22 |
+| 20 | -0.001 / -0.023 | -0.002 / -0.016 | 0.47 / 0.24 |
+| 28 | +0.004 / -0.042 | +0.006 / -0.026 | 0.40 / 0.24 |
 
 | Dictionary trained on | Families more stable than chance? |
 |---|---|
-| pt + it mix (flat SAE + post-hoc level-2 / k-means; 2 models x 3 layers x 3 seeds) | yes, 72/72 excess cells negative |
-| pt + it mix, Matryoshka SAE (seed 0) | vs shuffled null 6/6 yes; vs noise null Gemma no (3/3 positive), Qwen yes |
-| it only (Gemma, seed 0) | moderate: shuffled 6/6 yes, noise only at L12 |
-| pt only (Gemma, seed 0) | no (10/12 excess >= 0) |
-| GemmaScope 2 (pretrained on pt text) | uninformative: FVU on image tokens 0.58-1.25 without the massive dim |
+| base + tuned mix | yes, strongly (72/72) |
+| tuned only | moderately (shuffled null 6/6; noise null only at layer 12) |
+| base only | no (10/12 at or above zero; the 2 negatives are -0.006 and -0.007) |
 
-Conclusion: 'stable parents' is not a robust property of the model; it depends on which activations the
-dictionary was trained on. A simple mechanism (pt-specific and it-specific sibling latents under one parent) was
-tested and not supported. Lesson: in SAE model diffing, run a base-only dictionary control.
+The two single-model dictionaries fit the other model about equally badly (FVU 0.40-0.50), so reconstruction
+quality alone does not explain why they disagree.
 
-Also found: the vision tower is bit-identical between pt and it in both model families (only the projector and
-the language model change). The log below is chronological; early entries contain claims later corrected
-(e.g. the first step-1 note on vision weights counted the projector as vision tower).
+## 5. Two more dictionaries
 
-Files: `onecell.py` (single Colab cell, Gemma; local test with `LOCAL_TEST=1`), `cell_qwen2vl.py`,
-`cell_vision.py` (generated by `make_cells.py`), `references/REFERENCES.md`.
+**Matryoshka SAE** (nested prefixes 256 / 1024 / 4096; parents = the first 256 latents; each later latent joins
+the parent it co-fires with most; trained on the mix; seed 0). Excess, noise / shuffled:
 
-## Original README and log
-
-Question: when a vision-language model is instruction-tuned, does it change **parent** concepts (broad, e.g.
-"animal") or **child** concepts (narrow, e.g. "husky")? Idea from SAE++ (arXiv 2606.16193), which builds
-2-level concept trees with a second SAE trained on the first SAE's decoder columns.
-
-Fast exploratory project: no pre-registration, all results exploratory.
-
-## Setup (week 1)
-- Models: `google/gemma-3-4b-pt` vs `google/gemma-3-4b-it` (Qwen3-VL has no public base model).
-- Data: COCO val2017, first 5000 images; same raw input for both models (BOS + image, no chat template);
-  32 fixed image-token positions per image; LM layers 12, 20, 28.
-- Step 1 checks whether the vision tower is identical in pt and it (if yes, only LM layers can differ).
-- Tree methods (all trained on the 50/50 pt+it mix): SAE++ joint (alpha=1), flat TopK SAE + post-hoc level-2
-  SAE ("meta"), flat SAE + k-means. n1=4096, k1=32, n2=256, k2=2.
-- Metric: change = 1 - corr(pt activation, it activation) on the same tokens. Parent activation = sum of its
-  children. Null = random groups with the same sizes. Block bootstrap over images (100 blocks).
-
-## How to run
-1. Accept the Gemma terms for both repos on huggingface.co; add Colab secret `HF_TOKEN`.
-2. Paste `onecell.py` into one Colab cell (A100 or L4), run. Results: `MyDrive/sae_tree_diff/w1/`
-   (`step1_vision.json`, `result_L{12,20,28}.json`, `sae_L*.pt`). A rerun skips finished layers.
-3. Local test (seconds, CPU): `LOCAL_TEST=1 SYNTH=1 python onecell.py` (tiny random Gemma3 for the plumbing,
-   then planted-tree activations for the metric). `SWAP=0` = null test.
-
-## Local test results (2026-10-29)
-- Planted re-routing (child re-drawn with prob 0.6, parent kept): flat_meta / flat_kmeans give
-  parent - random = -0.065 to -0.080 (CI below 0). Works.
-- Null (SWAP=0, amplitude noise only): parent - random = -0.002 to -0.003. So the metric has a small negative
-  bias; **a gap is only interesting if it is clearly larger than ~0.01 in size** (and its CI excludes 0).
-- SAE++ joint (alpha=1) on planted data: worse reconstruction (FVU 0.24 vs 0.08) and sibling decoder cosine
-  0.58 vs 0.15 for the flat methods -> siblings pulled together (the "copies" concern). Check alpha on real data.
-
-## Go / no-go (light rule)
-Go if, in at least one layer, parent - random differs from 0 by > 0.01 with CI excluding 0 for both flat
-methods (not only SAE++). Otherwise: parents and children change about equally -> stop or change the pair
-(e.g. Qwen3-VL Instruct vs Thinking).
-
-## Colab log
-- 2026-10-29 w1 (LM site) step 1: vision weights of pt and it are NOT identical (max abs diff 0.18 over vision
-  tower + projector; LM layer 0 max abs diff 1.5). So the vision tower can also change -> `cell_vision.py`
-  (vision-tower layers 13 and 26; 26 = SAE++ site). Its step 1 also splits the difference by part
-  (vision_tower / projector / lm_layer0) with relative change ||w_it - w_pt|| / ||w_pt||.
-  Results: `MyDrive/sae_tree_diff/w1_vision/`. Rebuild cells with `python3 make_cells.py`.
-
-- 2026-10-29 w1: activations had to be stored as float32 (float16 overflow), and the first OOM came from the
-  lm_head logits (fixed: m.model). `it` max |x|: L12 101k, L20 196k, L28 226k, always dims 443 and 1666
-  (median-dim max 42 / 198 / 760) = Gemma massive activations. v2 preprocessing: center with the shared pt+it
-  mean, zero dims with std > 10x median dim std, scale. Results named `result_v2_L*.json`.
-
-- 2026-10-29 w1 v2 L12 (Gemma-3-4B pt vs it, LM layer 12; removed dim 443 = 97.5% of centered variance):
-  saepp_joint child 0.353 parent 0.300 random 0.346, P-R -0.047 [-0.050,-0.043], sibling cos 0.73, FVU 0.34/0.37;
-  flat_meta P-R -0.110 [-0.111,-0.109]; flat_kmeans P-R -0.132 [-0.133,-0.130]; flat sibling cos 0.09-0.11,
-  FVU 0.21/0.24. Caveat: TopK switching between similar sibling latents can produce this without any
-  fine-tuning effect -> v3 adds a noise-matched null (pt vs pt+noise with the same child change). On planted
-  data the noise null gives about half the planted gap (-0.035 vs -0.075), so this control matters.
-
-- 2026-10-29 w1 v2 L20 (dim 443 removed, 94.6%): saepp P-R -0.028 [-0.030,-0.025] sib cos 0.70 FVU 0.39/0.41;
-  flat_meta -0.098 [-0.099,-0.097]; flat_kmeans -0.109; child change 0.674 (flat). L28 (dim 443, 68.8%): saepp
-  -0.034, sib cos 0.70, FVU 0.43/0.45; flat_meta -0.094; flat_kmeans -0.112; child 0.602. Same pattern at all
-  3 layers. v3 null was mis-calibrated (20% subset -> child 0.503 vs target 0.353); v4 calibrates on all tokens
-  (exact match on planted data), files `null_v4_L*.json`.
-
-- 2026-10-29 noise null v4 (child change matched exactly), null P-R vs real P-R:
-  L12 flat_meta -0.057 vs -0.110, flat_kmeans -0.066 vs -0.132, saepp -0.115 vs -0.047;
-  L20 flat_meta -0.053 vs -0.098, flat_kmeans -0.058 vs -0.109, saepp -0.111 vs -0.028;
-  L28 saepp -0.010 vs -0.034, flat_meta -0.076 vs -0.094, flat_kmeans -0.076 vs -0.112. Flat excess (real - noise): L12 -0.053/-0.066, L20 -0.045/-0.051, L28 -0.018/-0.036 (shrinks with depth).
-  SAE++: noise makes its near-copy groups look MORE stable than real fine-tuning does at L12/L20 (not at L28).
-  v5 adds a stronger null: pt + sigma * (it - pt) of another random token (`shuf_v5_L*.json`).
-
-- 2026-10-29 shuffled-difference null v5 (pt + sigma*(it-pt) of a random other token; child change matched):
-  null P-R vs real: L12 flat_meta -0.074 vs -0.110, flat_kmeans -0.103 vs -0.132, saepp -0.071 vs -0.047;
-  L20 flat_meta -0.051 vs -0.098, flat_kmeans -0.057 vs -0.109, saepp -0.066 vs -0.028;
-  L28 flat_meta -0.038 vs -0.094, flat_kmeans -0.063 vs -0.112, saepp +0.014 vs -0.034.
-
-## Week-1 summary (exploratory)
-Flat methods, excess = real P-R minus null P-R (negative = parents more stable than the null predicts):
-
-| Layer | noise null (meta / kmeans) | shuffled null (meta / kmeans) |
-|---|---|---|
-| 12 | -0.053 / -0.066 | -0.036 / -0.029 |
-| 20 | -0.045 / -0.051 | -0.047 / -0.052 |
-| 28 | -0.018 / -0.036 | -0.056 / -0.049 |
-
-- Robust part: in all 12 cells (3 layers x 2 flat methods x 2 nulls) the real gap is more negative than the null,
-  by 0.018-0.066. Instruction tuning moves activation between sibling latents while keeping the parent group
-  more stable than size-matched changes do.
-- Not robust: the depth trend (it reverses between the two nulls) -> do not claim it.
-- SAE++ (joint, alpha=1): siblings are near-copies (cos 0.70-0.73), worse FVU, and its excess flips sign by
-  layer (+0.068/+0.083/-0.024 noise; +0.024/+0.038/-0.048 shuffled) -> its groups do not track this structure.
-- Limits: one SAE seed per method, one model pair, LM layers only, image tokens only, raw (no chat) input.
-
-Next: SAE seed repeat; vision site (cell_vision.py); second model pair (Qwen3-VL Instruct vs Thinking);
-look at what the stable parents are (top images).
-
-- v6: `extra_seeds=[1]` retrains flat SAE + meta with seed 1 at all layers and reruns both nulls
-  (`*_s1_L*.json`); `inspect_layers=[20]` writes `parents_L20.json`: the 8 most / least stable flat_meta parents
-  (>= 3 children, >= 500 firing tokens) with the COCO labels over-represented in their top-50 images, and each
-  child's top label in pt -> it.
-
-- 2026-10-29 v6 seed 1 (flat methods): excess over noise / shuffled null (meta, kmeans):
-  L12 -0.053, -0.068 / -0.039, -0.037 (seed 0: -0.053, -0.066 / -0.036, -0.029);
-  L20 -0.042, -0.043 / -0.041, -0.036 (seed 0: -0.045, -0.051 / -0.047, -0.052). Replicates across SAE seeds.
-- v6 parents L20 (flat_meta seed 0; 8 most / least stable of the candidates): two kinds of groups.
-  Stable: parent change 0.06-0.15 while children change 0.36-0.63 (re-routing inside the group); clear
-  labels for some: baseball (glove x22, bat x15.5, ball x10.7), vehicles (truck x4.4, car x3.0), train (x7.0, x6.4);
-  others only person/dining table near base rate. Unstable: parent 0.89-0.94 with children 0.87-0.95 (whole
-  group rewired); labels: food (broccoli x16.9, carrot x14.8), bathroom (sink x10.2, toilet x9.4), tennis x9.6,
-  desk (mouse x11.4, laptop x6.0). Hint only (16 groups): outdoor/vehicle/sport stable, food/indoor rewired.
-  Caveat: child top-label pt->it is noisy (e.g. children with change 0.02 whose label flips) -> do not over-read.
-
-- v6 seed 1 L28: excess noise -0.032 / -0.034, shuffled -0.069 / -0.047 (seed 0: -0.018 / -0.036, -0.056 / -0.049).
-
-## Week-1 summary after v6 (2 SAE seeds)
-Excess = real P-R minus null P-R, flat methods (meta / kmeans):
-
-| Layer | Seed | noise null | shuffled null |
+| Model | Layers | noise null | shuffled null |
 |---|---|---|---|
-| 12 | 0 | -0.053 / -0.066 | -0.036 / -0.029 |
-| 12 | 1 | -0.053 / -0.068 | -0.039 / -0.037 |
-| 20 | 0 | -0.045 / -0.051 | -0.047 / -0.052 |
-| 20 | 1 | -0.042 / -0.043 | -0.041 / -0.036 |
-| 28 | 0 | -0.018 / -0.036 | -0.056 / -0.049 |
-| 28 | 1 | -0.032 / -0.034 | -0.069 / -0.047 |
+| Gemma | 12 / 20 / 28 | +0.034 / +0.031 / +0.072 | -0.014 / -0.027 / -0.056 |
+| Qwen | 10 / 16 / 23 | -0.003 / -0.005 / -0.004 | -0.002 / -0.003 / -0.002 |
 
-All 24 cells negative (range -0.018 to -0.069). Bootstrap CIs on each P-R are about +/-0.002, so seed and null
-choice matter more than sampling. Exploratory; one model pair (Gemma-3-4B pt vs it), LM layers, COCO images.
+In Gemma, the Matryoshka parents are far more robust to isotropic noise than to real tuning, so the sign flips
+against the noise null. The coarse latents (first 256) change about as much under real tuning as under the
+shuffled null in both models.
 
-- v7: faster image step (CPU preprocessing in a background thread, one GPU->CPU copy per layer per batch;
-  activations checked identical to v6 on the tiny model, max abs diff 0.0), Qwen2-VL support
-  (`cell_qwen2vl.py`: Qwen/Qwen2-VL-2B vs -Instruct, images resized to 448x448 = 256 image tokens, LM layers
-  10/16/23, results in `MyDrive/sae_tree_diff/w2_qwen2vl/`), and step 7 family count (`families_L*.json`):
-  share of parents whose container score (mean child change - parent change) beats the 95th percentile of
-  size-matched random groups, and share with parent change >= 0.8. Planted test: container 0.31-0.41 vs null 0.05.
+**GemmaScope 2** (pretrained by Google on Gemma-3-4B-pt text; `resid_post_all`, 16k latents, small L0). It
+does not reconstruct image-token activations: FVU without the massive dimension is 1.16 / 0.81 / 0.58 at layers
+12 / 20 / 28 on base activations. Its family results (mostly zero or positive excess) are therefore
+uninformative.
 
-## Second model: Qwen2-VL-2B base vs Instruct (w2_qwen2vl, v7, 2026-10-29)
-- Step 1: vision tower identical (385 tensors), projector rel change 1.2%, LM layer 0 rel change 0.22% (very light
-  tuning). Image step 12 images/s (L4). Removed dim 1073 (6.7-11.6% of centered variance).
-- Child change only 0.022 / 0.032 / 0.037 (L10 / L16 / L23) vs 0.42-0.67 in Gemma.
-- SAE++ sibling cos 0.70 at all layers (Gemma 0.70-0.73) -> near-copy siblings in both model families.
-- Excess = real P-R minus null P-R (meta / kmeans):
+## 6. Why? A mechanism I tested and could not confirm
 
-| Layer | Seed | noise null | shuffled null |
-|---|---|---|---|
-| 10 | 0 | -0.008 / -0.007 | -0.006 / -0.004 |
-| 10 | 1 | -0.009 / -0.007 | -0.006 / -0.006 |
-| 16 | 0 | -0.008 / -0.008 | -0.006 / -0.006 |
-| 16 | 1 | -0.007 / -0.009 | -0.005 / -0.006 |
-| 23 | 0 | -0.006 / -0.006 | -0.005 / -0.005 |
-| 23 | 1 | -0.007 / -0.006 | -0.005 / -0.004 |
-| 10 | 2 | -0.006 / -0.007 | -0.004 / -0.006 |
-| 16 | 2 | -0.007 / -0.008 | -0.007 / -0.006 |
-| 23 | 2 | -0.006 / -0.006 | -0.005 / -0.004 |
+Hypothesis: a mixed dictionary splits one concept into a base-specific child and a tuned-specific child under a
+shared parent, so the children "swap" while the parent stays.
 
-  Seeds 0-1: all 24 negative (-0.004 to -0.009), i.e. 12-41% of the child change (Gemma: 3-16%). Shuffled sigma
-  0.94-1.12 (real it-pt differences at about natural size). Two models together: 48 of 48 cells negative.
-  Seed 2 (v9, 2026-10-29): all 12 negative (-0.004 to -0.008); Qwen 3 seeds: 36 of 36 negative. Real P-R s2
-  meta / kmeans: L10 -0.005/-0.009, L16 -0.006/-0.012, L23 -0.011/-0.014; sib cos 0.07-0.09.
-- Families (v7 step 7): container share 0.10/0.07 (L10), 0.08/0.07 (L16), 0.19/0.19 (L23) vs null 0.05.
-  v7 'rewired' (parent change >= 0.8) is 0 everywhere (absolute threshold does not fit Qwen) -> v8 relative rule.
-- Most-changed families at L16 include bathroom (toilet x14.1, sink x7.0) and food (broccoli x23.9, carrot x23.5),
-  as in Gemma L20 (sink x10.2, toilet x9.4; broccoli x16.9, carrot x14.8). Hint only (8 groups per model).
-  v7 'STABLE' examples were untouched groups (change 0.00), not containers -> v8 picks by container score.
+- The mixed dictionary does contain many model-specific children (latents with > 80% of their firings in one
+  model): tuned-specific 3-8%, base-specific 3-10%. The base-only dictionary has almost no tuned-specific
+  latents (1-9 in total).
+- But tuned-specific children do **not** have a base-specific sibling more often than chance. For "meta" groups
+  the rate is below the random-group rate at all 3 layers: 0.43 vs 0.53, 0.50 vs 0.80, 0.30 vs 0.40.
+- The share of model-specific children in a family does not predict its container score (Spearman -0.14 to
+  +0.15).
 
-- v8 (Qwen, 2026-10-29): families_v8: container share 0.10/0.07 (L10), 0.08/0.07 (L16), 0.19/0.19 (L23) vs null
-  0.05; 'changed' share (parent change above null 95th pct) 0.01/0.02, 0.04/0.02, 0.04/0.01 vs null 0.05 ->
-  real families are rarely more changed than random groups; no separate 'rewired' class in Qwen.
-  parents_v8 L16 container examples: parent change 0.004-0.023 while children change 0.047-0.064; mostly indoor
-  table scenes (cup/table/chair x2-2.6), cars (x1.9-2.1), one food family (sandwich x10.2, cake x8.1).
-  Most changed (unchanged list): bathroom, broccoli/carrot, kite, surfing/boats.
+So the simple twin mechanism is not supported. One untested possibility: model-specific latents change almost
+completely and may cluster in a few families, so random groups (which spread them out) look more changed than
+real families.
 
-- Gemma vision site (2026-10-29): step 1 shows the Gemma vision tower is identical in pt and it (437 tensors,
-  max diff 0.0); only the projector changed (rel 0.16). Vision-tower activations are therefore identical -> nothing
-  to test. Same in Qwen (385 tensors identical). v10: the vision cell stops after step 1 in this case; the NOTE
-  now checks the vision tower only. Gemma LM layer 0 rel change 0.054 (Qwen 0.0022).
+## 7. Side finding: the vision tower does not change
 
-## Gemma v8 families + examples (v9 run, 2026-10-29)
-- Activations re-extracted (about 17 min per model, 4.8 images/s on L4); seed-0/1 results reused from Drive.
-- families_v8 (meta / kmeans): container share L12 0.09/0.08, L20 0.05/0.02, L28 0.43/0.35 (null 0.05);
-  changed share L12 0.10/0.05, L20 0.08/0.04, L28 0.11/0.07 (null 0.05). Score median (child - parent change)
-  +0.03 to +0.06 vs null -0.04 to -0.06 at every layer: the whole distribution shifts, but at L20 the tail
-  above the null 95th pct is at chance. Gemma (meta) also has a small 'changed' excess (0.08-0.11), unlike Qwen.
-- parents_v8 L20 container: baseball (glove x22, bat x15.5), elephant x11.2, dog x5.6; parent change 0.06-0.38,
-  children 0.53-0.82; several are generic 'person' groups (lift < 1). Children relabel (frisbee->sports ball,
-  hot dog->pizza).
-- parents_v8 L20 changed (parent 0.89-0.94): tennis, food (broccoli x16.9, carrot x14.8), desk (mouse, laptop),
-  sheep/train, bathroom (sink x10.2, toilet x9.4). Food + bathroom most changed in both Gemma and Qwen.
+In both pairs, every vision-tower weight is bit-identical between the base and the tuned model (Gemma: 437
+tensors, Qwen: 385). Only the projector (relative weight change: Gemma 0.16, Qwen 0.012) and the language model
+change. So for these models, instruction tuning changes nothing before the projector, and analyses of
+vision-tower layers will find no difference.
 
-## Gemma seed 2 (v9/v11 run, 2026-10-29)
-Excess = real P-R minus null P-R (meta / kmeans):
+## 8. Limitations
 
-| Layer | noise null | shuffled null |
-|---|---|---|
-| 12 | -0.046 / -0.059 | -0.030 / -0.024 |
-| 20 | -0.051 / -0.033 | -0.055 / -0.031 |
-| 28 | -0.030 / -0.045 | -0.066 / -0.062 |
+- The controls (base-only, tuned-only, Matryoshka, mechanism check) use one SAE seed, and the single-model
+  dictionaries were run on Gemma only.
+- Small dictionaries (4096 latents, 4000 training steps), small models (2B and 4B), image tokens only, one
+  dataset.
+- "Change" is a correlation over tokens. Other diffing measures (decoder-direction change, activation
+  frequency, causal effects) were not tested.
+- No causal test: I did not check whether any of these families matter for model behavior.
 
-All 12 negative. Gemma 3 seeds: 36/36; Qwen 3 seeds: 36/36; both models 72/72 cells negative.
-Real P-R seed 2: L12 -0.110/-0.119, L20 -0.106/-0.095, L28 -0.105/-0.115 (seeds 0-1: -0.09 to -0.13).
+## 9. Takeaway
 
-## v11 Matryoshka + GemmaScope 2 (2026-10-29, seed 0)
-Matryoshka TopK SAE (prefixes 256/1024/4096; parents = first 256, children join the parent they co-fire with most;
-child fires with its parent 0.72-0.75 of the time). Excess = real P-R minus null P-R:
+The family structure an SAE reports for a base-vs-tuned comparison can depend strongly on which activations the
+dictionary was trained on. This fits known problems with shared dictionaries in model diffing: Minder et al.
+(arXiv 2504.02922) showed that crosscoders can report spurious chat-only latents. Here the same issue appears at
+the level of concept hierarchies. When diffing with SAEs, compare a mixed dictionary with a base-only one (and
+ideally a tuned-only one) before reading structure into the result.
 
-| Model | Layer | over noise | over shuffled | coarse / fine change (real; shuffled) |
-|---|---|---|---|---|
-| Gemma | 12 | +0.034 | -0.014 | 0.349 / 0.391; 0.321 / 0.393 |
-| Gemma | 20 | +0.031 | -0.027 | 0.558 / 0.666; 0.548 / 0.667 |
-| Gemma | 28 | +0.072 | -0.056 | 0.491 / 0.601; 0.494 / 0.600 |
-| Qwen | 10 | -0.003 | -0.002 | 0.011 / 0.020; 0.010 / 0.020 |
-| Qwen | 16 | -0.005 | -0.003 | 0.014 / 0.031; 0.013 / 0.031 |
-| Qwen | 23 | -0.004 | -0.002 | 0.018 / 0.037; 0.019 / 0.037 |
+## Related work
 
-- Shuffled null: 6/6 negative (Gemma -0.014 to -0.056; Qwen -0.002 to -0.003, smaller than flat SAEs).
-- Noise null: Gemma 3/3 POSITIVE (Matryoshka coarse latents are very robust to isotropic noise: coarse change
-  under noise 0.15-0.32 vs real 0.35-0.56); Qwen 3/3 negative.
-- Coarse vs fine: real coarse change is about equal to the shuffled-null coarse change in both models -> no extra
-  protection of Matryoshka's coarse latents beyond what a shuffled change gives.
-- GemmaScope 2 (google/gemma-scope-2-4b-pt, resid_post_all layer L-1, 16k_l0_small, raw activations, trained on
-  pt text). Excess (noise / shuffled):
+- SAE++ / cascaded SAEs: arXiv 2606.16193 (the tree construction that motivated this).
+- Crosscoders and model diffing: Lindsey et al. 2024 (transformer-circuits.pub); Minder et al., arXiv 2504.02922;
+  Delta-Crosscoder, arXiv 2603.04426; stage-wise model diffing (transformer-circuits.pub/2024/model-diffing).
+- Base SAEs on tuned models: Kissane et al. 2024, "SAEs (usually) transfer between base and chat models".
+- SAE latents after supervised fine-tuning: Chopra, arXiv 2605.11426.
+- Hierarchical SAEs: Matryoshka SAEs, arXiv 2503.17547; H-SAE, arXiv 2506.01197.
+- Full list: [references/REFERENCES.md](references/REFERENCES.md).
 
-| Layer | gs_meta | gs_kmeans | fvu pt / it (incl. dim 443) |
-|---|---|---|---|
-| 12 | +0.009 / +0.001 | +0.064 / +0.047 | 0.066 / 0.079 |
-| 20 | +0.052 / +0.030 | -0.008 / -0.010 | 0.097 / 0.133 |
-| 28 | +0.029 / +0.003 | +0.023 / +0.002 | 0.253 / 0.437 |
+## Reproduce
 
-  10/12 excess >= 0: no stable-parent effect with GemmaScope (child change 0.62-0.72, higher than ours).
-  Printed FVU includes massive dim 443 (too optimistic); v12 adds FVU without it. Possible reasons: (a) text SAE
-  on image tokens; (b) our SAEs are trained on the pt+it mix and may give pt/it versions of a concept separate
-  sibling latents -> stable parents by construction. v12 control: same SAE trained on pt only.
+| File | What it is |
+|---|---|
+| `onecell.py` | Whole pipeline as one Colab cell (Gemma; L4 or A100; needs `HF_TOKEN` and the Gemma terms). Results go to Google Drive; finished steps are skipped on a rerun. |
+| `cell_qwen2vl.py`, `cell_vision.py` | The same code with other settings, generated by `make_cells.py` |
+| `LOG.md` | Full chronological research log (early entries are corrected by later ones) |
 
-## v12 control: SAE trained on pt ONLY (Gemma, seed 0, 2026-10-29) - KEY RESULT
-Same flat SAE + meta / k-means, trained on pt activations only. Excess (noise / shuffled):
-
-| Layer | meta | k-means | fvu pt / it | mixed SAE seed 0 (meta, noise / shuf) |
-|---|---|---|---|---|
-| 12 | +0.028 / +0.027 | +0.003 / +0.019 | 0.187 / 0.420 | -0.053 / -0.036 |
-| 20 | +0.029 / +0.015 | +0.028 / +0.023 | 0.206 / 0.500 | -0.045 / -0.047 |
-| 28 | +0.020 / -0.007 | +0.007 / -0.006 | 0.192 / 0.428 | -0.018 / ... |
-
-- 10/12 >= 0, the 2 negatives tiny (-0.006, -0.007). The stable-parent effect DISAPPEARS when the dictionary is
-  trained without it activations. Our 72/72 result depends on training the SAE on the pt+it mix.
-- The pt-only SAE fits it activations ~2.3x worse than pt (fvu 0.42-0.50 vs 0.19-0.21): tuning adds directions
-  pt features do not cover. Hypothesis: the mixed SAE gives these their own (it-specific) children under shared
-  parents -> stable parents by construction. v13 tests this (model-specific children) + it-only SAE mirror.
-- GemmaScope FVU without massive dim 443: L12 1.161 / 1.245, L20 0.814 / 0.962, L28 0.583 / 0.701 (pt / it).
-  GemmaScope does NOT reconstruct image-token activations (FVU >= 0.58, > 1 at L12) -> GemmaScope results are
-  uninformative either way; drop them as evidence (report as a failed fit).
-
-## v13: mechanism check + it-only SAE (Gemma, seed 0, 2026-10-29)
-Model-specific children (fire share > 0.8 in one model, >= 50 fires):
-- Mixed SAE: it-only 3-8%, pt-only 3-10% of children; pt-only SAE: it-only ~0 (1-9 latents), pt-only 1-4%.
-- it-only child has a pt-only sibling in the same family: meta BELOW random at all layers (0.43 vs 0.53, 0.50 vs
-  0.80, 0.30 vs 0.40); k-means mixed. rho(share of model-specific children, container score) -0.14..+0.15 (~0).
-  -> the 'pt-twin / it-twin under one parent' mechanism is NOT supported.
-
-it-only SAE (mirror of v12). Excess (noise / shuffled):
-
-| Layer | meta | k-means | fvu pt / it |
-|---|---|---|---|
-| 12 | -0.013 / -0.019 | -0.034 / -0.031 | 0.396 / 0.223 |
-| 20 | -0.001 / -0.023 | -0.002 / -0.016 | 0.472 / 0.244 |
-| 28 | +0.004 / -0.042 | +0.006 / -0.026 | 0.396 / 0.237 |
-
-- Shuffled null 6/6 negative; noise null negative only at L12 (about 0 at L20 / L28).
-- ASYMMETRY: families from a dictionary that saw it activations (mixed: strong; it-only: moderate) show stable
-  parents; families from a pt-only dictionary do not (10/12 >= 0). Fit gaps are symmetric (pt-only on it
-  0.42-0.50; it-only on pt 0.40-0.47), so fit quality alone does not explain it.
-
-## Summary after v13 (decision)
-'Stable parents' is not a robust fact about the model: it depends on which activations the dictionary was trained
-on (mixed > it-only > pt-only = none). GemmaScope (pt text) does not fit image tokens (uninformative).
-Matryoshka (mixed): shuffled 6/6 negative, Gemma noise 3/3 positive. Single seed for all controls.
-Lit review round 3: shared-dictionary artifacts are known for crosscoders (Minder et al. 2025); hierarchy-level
-version and this asymmetry not found. Decision (rule set before v13): mechanism unclear -> STOP main line.
-Not done: replication of the pt-only / it-only asymmetry on Qwen2-VL; more seeds for the controls.
-
-## Open / next
-- Gemma v10 onecell.py (LM site) rerun (activations gone, ~20-40 min image step) for families_v8 + parents_v8.
-- Third SAE seed: done in both models (72/72).
-- v11 Matryoshka + GemmaScope 2: running (Gemma), Qwen Matryoshka optional.
-- Independent code check before any release.
-
-## Before any public release
-Independent code check (blind rebuild in a fresh Desktop folder, then compare).
+Local CPU test with a tiny random model and planted-tree data: `LOCAL_TEST=1 SYNTH=1 python onecell.py`.
+Activations take about 17 min per Gemma model on an L4 (about 7 min per Qwen model). Each SAE and its nulls take
+a few minutes per layer.
